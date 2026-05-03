@@ -65,6 +65,11 @@ def search_papers(
             a.get("author", {}).get("display_name", "")
             for a in (work.get("authorships") or [])[:5]
         ]
+        # OA availability
+        oa = work.get("open_access") or {}
+        best_oa = work.get("best_oa_location") or {}
+        is_oa = oa.get("is_oa", False)
+        oa_url = best_oa.get("pdf_url") or best_oa.get("landing_page_url") or oa.get("oa_url") or ""
         results.append({
             "title": work.get("title", ""),
             "doi": doi,
@@ -73,6 +78,8 @@ def search_papers(
             "year": work.get("publication_year", ""),
             "cited_by_count": work.get("cited_by_count", 0),
             "abstract": _reconstruct_abstract(work.get("abstract_inverted_index")),
+            "is_oa": is_oa,
+            "oa_url": oa_url,
         })
     return results
 
