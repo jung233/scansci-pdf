@@ -60,5 +60,27 @@ def normalize_doi_unicode(value: str) -> str | None:
     return None
 
 
+def validate_doi(doi: str) -> tuple[bool, str]:
+    """Check if a DOI resolves via doi.org. Returns (valid, resolved_url or error)."""
+    import requests
+    try:
+        resp = requests.head(
+            f"https://doi.org/{urllib.parse.quote(doi, safe='')}",
+            timeout=10,
+            allow_redirects=True,
+            headers={"User-Agent": "scansci-pdf/1.1"},
+        )
+        if resp.status_code == 200:
+            return True, resp.url
+        elif resp.status_code == 404:
+            return False, "DOI not found (404)"
+        else:
+            return True, f"status={resp.status_code}"
+    except requests.Timeout:
+        return True, "timeout (assume valid)"
+    except Exception as e:
+        return True, f"check failed: {e}"
+
+
 def safe_filename(identifier: str) -> str:
     return re.sub(r"[^A-Za-z0-9._-]+", "_", identifier).strip("_") or "paper"

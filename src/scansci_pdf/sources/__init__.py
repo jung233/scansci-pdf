@@ -401,6 +401,15 @@ def download(
 
     # Scan output dir for existing file with same rename pattern
     doi = normalize_doi(identifier) if not is_arxiv_identifier(identifier) else identifier
+
+    # Validate DOI before attempting download
+    if not is_arxiv_identifier(identifier):
+        from ..identifiers import validate_doi
+        valid, msg = validate_doi(doi)
+        if not valid:
+            log.info(f"   DOI validation failed: {msg}")
+            return {"success": False, "identifier": identifier, "doi": doi, "error": f"Invalid DOI: {msg}"}
+
     from ..citation import fetch_metadata
     metadata = fetch_metadata(doi, config)
     if metadata:
