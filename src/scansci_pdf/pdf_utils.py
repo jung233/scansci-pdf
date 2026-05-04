@@ -171,12 +171,16 @@ def download_pdf(
 
         output_path.parent.mkdir(parents=True, exist_ok=True)
         tmp_path = output_path.with_suffix(output_path.suffix + ".part")
-        with tmp_path.open("wb") as fh:
-            fh.write(first_chunk)
-            for chunk in iterator:
-                if chunk:
-                    fh.write(chunk)
-        tmp_path.replace(output_path)
+        try:
+            with tmp_path.open("wb") as fh:
+                fh.write(first_chunk)
+                for chunk in iterator:
+                    if chunk:
+                        fh.write(chunk)
+            tmp_path.replace(output_path)
+        except Exception:
+            tmp_path.unlink(missing_ok=True)
+            raise
 
         if is_pdf_file(output_path):
             return success(output_path.stem, output_path, source)

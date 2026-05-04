@@ -52,6 +52,55 @@ STRATEGIES = {
     "legal_only",    # 只用合法源（无 Sci-Hub/LibGen）
 }
 
+_cleanup_done = False
+
+
+def _cleanup_stale_files(target_dir: Path) -> None:
+    """Remove orphaned .part files and racing temp files from previous runs."""
+    global _cleanup_done
+    if _cleanup_done:
+        return
+    _cleanup_done = True
+    if not target_dir.exists():
+        return
+    count = 0
+    for f in target_dir.iterdir():
+        if not f.is_file():
+            continue
+        name = f.name
+        # Always clean up .part files
+        if name.endswith(".part"):
+            try:
+                f.unlink()
+                count += 1
+            except OSError:
+                pass
+            continue
+        # Clean up racing temp files: DOI-based identifier + source label suffix
+        # e.g. 10_1038_nature12373_Unpaywall.pdf, 10_1016_test_scihub_st.pdf
+        # Must start with 10_ (DOI prefix) and have at least 4 segments (10_NNNN_suffix_label)
+        if name.endswith(".pdf") and name.startswith("10_"):
+            stem = name[:-4]  # remove .pdf
+            # Split from the right to get the last segment as the source label
+            parts = stem.rsplit("_", 1)
+            if len(parts) == 2:
+                base, label = parts
+                # Verify: base must look like a DOI (10_NNNN_... with at least 4 segments)
+                # and label must be a source name (letters, not just a number)
+                base_parts = base.split("_")
+                if (len(base_parts) >= 3
+                        and base_parts[0] == "10"
+                        and base_parts[1].isdigit()
+                        and len(base_parts[1]) >= 3
+                        and any(c.isalpha() for c in label)):
+                    try:
+                        f.unlink()
+                        count += 1
+                    except OSError:
+                        pass
+    if count > 0:
+        log.info(f"Cleaned up {count} stale temp files")
+
 
 def _try_source(
     source_fn: Any, doi: str, output_path: Path, config: dict[str, Any], label: str, use_tor: bool = False
@@ -403,6 +452,8 @@ def download(
     target_dir = Path(output_dir) if output_dir else Path(config["output_dir"])
     target_dir.mkdir(parents=True, exist_ok=True)
 
+    _cleanup_stale_files(target_dir)
+
     identifier = identifier.strip()
     output_path = target_dir / f"{safe_filename(identifier)}.pdf"
 
@@ -702,6 +753,7 @@ def batch_download(
     delay_between = float(config.get("request_delay_max", 0.3)) * 2
     total = len(pending_identifiers)
     completed_count = [0]
+    num_invalid = len(invalid_results)
 
     def _staggered_download(ident: str) -> dict[str, Any]:
         with delay_lock:
@@ -730,7 +782,7 @@ def batch_download(
                 if progress_callback:
                     try:
                         progress_callback(
-                            completed_count[0] + skipped_completed,
+                            completed_count[0] + skipped_completed + num_invalid,
                             len(unique_identifiers),
                             pending_identifiers[idx],
                             result,

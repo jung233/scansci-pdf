@@ -106,6 +106,23 @@ from ..log import get_logger
 log = get_logger()
 
 
+def _write_pdf_atomic(output_path: Path, first: bytes, iterator: Any) -> bool:
+    """Write PDF to .part file then atomically rename. Cleans up on failure."""
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = output_path.with_suffix(output_path.suffix + ".part")
+    try:
+        with tmp_path.open("wb") as fh:
+            fh.write(first)
+            for chunk in iterator:
+                if chunk:
+                    fh.write(chunk)
+        tmp_path.replace(output_path)
+        return True
+    except Exception:
+        tmp_path.unlink(missing_ok=True)
+        return False
+
+
 # ============================================================
 # Publisher matching
 # ============================================================
@@ -196,15 +213,8 @@ def try_publisher_direct(doi: str, output_path: Path, config: dict[str, Any]) ->
             if not _response_looks_pdf(resp, first):
                 continue
 
-            output_path.parent.mkdir(parents=True, exist_ok=True)
-            tmp_path = output_path.with_suffix(output_path.suffix + ".part")
-            with tmp_path.open("wb") as fh:
-                fh.write(first)
-                for chunk in iterator:
-                    if chunk:
-                        fh.write(chunk)
-            tmp_path.replace(output_path)
-
+            if not _write_pdf_atomic(output_path, first, iterator):
+                continue
             if is_pdf_file(output_path):
                 return success(doi, output_path, f"Publisher({name})")
 
@@ -265,15 +275,8 @@ def try_mdpi_direct(doi: str, output_path: Path, config: dict[str, Any]) -> dict
                 if not _response_looks_pdf(resp2, first):
                     continue
 
-                output_path.parent.mkdir(parents=True, exist_ok=True)
-                tmp_path = output_path.with_suffix(output_path.suffix + ".part")
-                with tmp_path.open("wb") as fh:
-                    fh.write(first)
-                    for chunk in iterator:
-                        if chunk:
-                            fh.write(chunk)
-                tmp_path.replace(output_path)
-
+                if not _write_pdf_atomic(output_path, first, iterator):
+                    continue
                 if is_pdf_file(output_path):
                     return success(doi, output_path, "MDPIDirect")
             except Exception:
@@ -327,15 +330,8 @@ def try_science_direct(doi: str, output_path: Path, config: dict[str, Any]) -> d
             if not _response_looks_pdf(resp, first):
                 continue
 
-            output_path.parent.mkdir(parents=True, exist_ok=True)
-            tmp_path = output_path.with_suffix(output_path.suffix + ".part")
-            with tmp_path.open("wb") as fh:
-                fh.write(first)
-                for chunk in iterator:
-                    if chunk:
-                        fh.write(chunk)
-            tmp_path.replace(output_path)
-
+            if not _write_pdf_atomic(output_path, first, iterator):
+                continue
             if is_pdf_file(output_path):
                 return success(doi, output_path, "ScienceDirect")
         except Exception:
@@ -375,15 +371,8 @@ def try_pnas_direct(doi: str, output_path: Path, config: dict[str, Any]) -> dict
         if not _response_looks_pdf(resp, first):
             return None
 
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = output_path.with_suffix(output_path.suffix + ".part")
-        with tmp_path.open("wb") as fh:
-            fh.write(first)
-            for chunk in iterator:
-                if chunk:
-                    fh.write(chunk)
-        tmp_path.replace(output_path)
-
+        if not _write_pdf_atomic(output_path, first, iterator):
+            return None
         if is_pdf_file(output_path):
             return success(doi, output_path, "PNASDirect")
     except Exception:
@@ -442,15 +431,8 @@ def try_plos_direct(doi: str, output_path: Path, config: dict[str, Any]) -> dict
         if not _response_looks_pdf(resp, first):
             return None
 
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = output_path.with_suffix(output_path.suffix + ".part")
-        with tmp_path.open("wb") as fh:
-            fh.write(first)
-            for chunk in iterator:
-                if chunk:
-                    fh.write(chunk)
-        tmp_path.replace(output_path)
-
+        if not _write_pdf_atomic(output_path, first, iterator):
+            return None
         if is_pdf_file(output_path):
             return success(doi, output_path, "PLOSDirect")
     except Exception:
@@ -490,15 +472,8 @@ def try_frontiers_direct(doi: str, output_path: Path, config: dict[str, Any]) ->
         if not _response_looks_pdf(resp, first):
             return None
 
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = output_path.with_suffix(output_path.suffix + ".part")
-        with tmp_path.open("wb") as fh:
-            fh.write(first)
-            for chunk in iterator:
-                if chunk:
-                    fh.write(chunk)
-        tmp_path.replace(output_path)
-
+        if not _write_pdf_atomic(output_path, first, iterator):
+            return None
         if is_pdf_file(output_path):
             return success(doi, output_path, "FrontiersDirect")
     except Exception:
@@ -542,15 +517,8 @@ def try_bmc_direct(doi: str, output_path: Path, config: dict[str, Any]) -> dict[
             if not _response_looks_pdf(resp, first):
                 continue
 
-            output_path.parent.mkdir(parents=True, exist_ok=True)
-            tmp_path = output_path.with_suffix(output_path.suffix + ".part")
-            with tmp_path.open("wb") as fh:
-                fh.write(first)
-                for chunk in iterator:
-                    if chunk:
-                        fh.write(chunk)
-            tmp_path.replace(output_path)
-
+            if not _write_pdf_atomic(output_path, first, iterator):
+                continue
             if is_pdf_file(output_path):
                 return success(doi, output_path, "BMCDirect")
         except Exception:
