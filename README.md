@@ -31,7 +31,7 @@ pip install scansci-pdf
 
 ### MCP 配置
 
-在 Claude Desktop / Claude Code 中添加：
+在任何支持 MCP 的 Agent 中添加以下配置即可使用：
 
 ```json
 {
@@ -44,8 +44,22 @@ pip install scansci-pdf
 }
 ```
 
+支持 MCP 的 Agent 和客户端：
+
+| 客户端 | 说明 |
+|--------|------|
+| Claude Desktop | Anthropic 官方桌面客户端 |
+| Claude Code | Anthropic 命令行 Agent |
+| Cursor | AI 代码编辑器 |
+| Windsurf | AI 代码编辑器 |
+| Cline | VS Code 插件 Agent |
+| Cherry Studio | 多模型桌面客户端 |
+| 任何 MCP 兼容客户端 | MCP 是开放协议，任何实现均可接入 |
+
 <details>
-<summary>HTTP 模式（Web 调用）</summary>
+<summary>HTTP 模式（远程/Web 调用）</summary>
+
+适用于远程部署或不支持 stdio 的场景：
 
 ```bash
 scansci-pdf run --mode streamable_http --host 0.0.0.0 --port 8000
