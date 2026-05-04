@@ -451,7 +451,12 @@ def try_vpnsci(doi: str, output_path: Path, config: dict[str, Any]) -> dict[str,
         if result:
             return result
 
-    # Step 3: Fetch via WebVPN and look for PDF link in HTML
+    # Step 3: Try CARSI-authenticated publisher access
+    carsi_result = _try_carsi(doi, resolved_url, output_path, config)
+    if carsi_result:
+        return carsi_result
+
+    # Step 4: Fetch via WebVPN and look for PDF link in HTML
     try:
         doi_url = f"https://doi.org/{doi}"
         resp = _fetch_via_webvpn(doi_url, config, stream=True)
@@ -478,6 +483,13 @@ def try_vpnsci(doi: str, output_path: Path, config: dict[str, Any]) -> dict[str,
         html = first + resp.raw.read(512_000, decode_content=True)
         html_str = html.decode("utf-8", errors="ignore")
 
+        # Check for Cloudflare block
+        if _is_cloudflare_block(html_str):
+            log.info("   [WebVPN] Cloudflare detected, trying FlareSolverr...")
+            flaresolverr_html = _try_flaresolverr_via_webvpn(doi_url, config)
+            if flaresolverr_html:
+                html_str = flaresolverr_html
+
         # Try _find_pdf_link (more thorough)
         found_pdf = _find_pdf_link(html_str, resp.url)
         if found_pdf:
@@ -495,6 +507,92 @@ def try_vpnsci(doi: str, output_path: Path, config: dict[str, Any]) -> dict[str,
         log.info(f"   [WebVPN] {e}")
 
     return None
+
+
+def _try_carsi(doi: str, resolved_url: str, output_path: Path, config: dict[str, Any]) -> dict[str, Any] | None:
+    """Try downloading via CARSI federated auth."""
+    if not config.get("carsi_enabled", False):
+        return None
+    try:
+        from .carsi import CARSIClient, detect_publisher
+        publisher = detect_publisher(resolved_url)
+        if not publisher:
+            return None
+        client = CARSIClient(config)
+
+        # Try PDF URL first
+        pdf_url = _construct_publisher_pdf_url(doi, resolved_url)
+        if pdf_url:
+            log.info(f"   [CARSI] Trying publisher PDF: {pdf_url[:80]}...")
+            resp = client.fetch(pdf_url, stream=True)
+            if resp and resp.status_code < 400:
+                result = _save_pdf_response(resp, output_path, doi, "CARSI")
+                if result:
+                    return result
+
+        # Try resolved URL HTML
+        resp = client.fetch(resolved_url)
+        if resp and resp.status_code < 400:
+            html_str = resp.text
+            found_pdf = _find_pdf_link(html_str, resp.url)
+            if found_pdf:
+                log.info(f"   [CARSI] Found PDF link: {found_pdf[:80]}...")
+                pdf_resp = client.fetch(found_pdf, stream=True)
+                if pdf_resp:
+                    return _save_pdf_response(pdf_resp, output_path, doi, "CARSI")
+    except Exception as e:
+        log.info(f"   [CARSI] {e}")
+    return None
+
+
+def _save_pdf_response(resp: requests.Response, output_path: Path, doi: str, source: str) -> dict[str, Any] | None:
+    """Save a PDF response to disk and validate it."""
+    try:
+        iterator = resp.iter_content(chunk_size=8192)
+        first = next(iterator, b"")
+        if not _response_looks_pdf(resp, first):
+            return None
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = output_path.with_suffix(output_path.suffix + ".part")
+        with tmp_path.open("wb") as fh:
+            fh.write(first)
+            for chunk in iterator:
+                if chunk:
+                    fh.write(chunk)
+        tmp_path.replace(output_path)
+        if is_pdf_file(output_path):
+            return success(doi, output_path, source)
+    except Exception:
+        pass
+    return None
+
+
+def _is_cloudflare_block(html: str) -> bool:
+    """Check if HTML response is a Cloudflare challenge page."""
+    lower = html.lower()
+    return any(sig in lower for sig in (
+        "cf-browser-verification",
+        "cloudflare",
+        "cf_chl_opt",
+        "challenge-platform",
+        "just a moment",
+        "checking your browser",
+    ))
+
+
+def _try_flaresolverr_via_webvpn(url: str, config: dict[str, Any]) -> str | None:
+    """Try fetching a URL through FlareSolverr, using WebVPN proxy."""
+    try:
+        from .flaresolverr import get_flaresolverr
+        client = get_flaresolverr(config)
+        if not client:
+            return None
+        base = _get_webvpn_base(config)
+        proxied_url = convert_url(url, base, config)
+        return client.get(proxied_url)
+    except Exception as e:
+        log.info(f"   [FlareSolverr] {e}")
+        return None
 
 
 def _download_pdf_vpnsci(
