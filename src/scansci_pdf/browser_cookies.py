@@ -98,7 +98,7 @@ def extract_via_camofox(
     url: str = "https://www.sciencedirect.com/",
     max_wait: int = 300,
 ) -> dict[str, Any]:
-    """Open visible camofox browser for institutional login, then capture publisher cookies.
+    """Open visible browser for institutional login, then capture publisher cookies.
 
     Args:
         config: scansci-pdf config dict.
@@ -109,13 +109,12 @@ def extract_via_camofox(
         Result dict with success, cookies_count, domains, etc.
     """
     try:
-        from camoufox.sync_api import Camoufox
-        from camoufox.addons import DefaultAddons
+        from cloakbrowser import launch
     except ImportError:
         return {
             "success": False,
-            "error": "camoufox not installed",
-            "fix": "pip install camoufox",
+            "error": "cloakbrowser not installed",
+            "fix": "pip install cloakbrowser",
         }
 
     from .config import DATA_DIR
@@ -123,47 +122,48 @@ def extract_via_camofox(
     cookie_file = cache_dir / "publisher_cookies.json"
     netscape_file = cache_dir / "publisher_cookies.txt"
 
-    log.info(f"   [cookies] Opening camofox-browser: {url}")
+    log.info(f"   [cookies] Opening browser: {url}")
     print(f"\n  请在浏览器中登录你的机构账号（如学校图书馆）")
     print(f"  打开页面: {url}")
     print(f"  登录完成后关闭浏览器窗口即可\n")
 
     try:
-        with Camoufox(headless=False, exclude_addons=[DefaultAddons.UBO]) as browser:
-            context = browser.new_context(viewport={"width": 1440, "height": 900})
-            page = context.new_page()
+        browser = launch(headless=False, humanize=True)
+        context = browser.new_context(viewport={"width": 1440, "height": 900})
+        page = context.new_page()
 
+        try:
+            page.goto(url, wait_until="domcontentloaded", timeout=60000)
+        except Exception as exc:
+            log.info(f"   [cookies] Page load warning: {exc}")
+
+        # Auto-dismiss cookie consent popups (common on Elsevier/Cell/Wiley/etc.)
+        time.sleep(2)
+        for js in [
+            # Elsevier/Cell cookie banner
+            "document.querySelector('#onetrust-accept-btn-handler')?.click()",
+            # OneTrust general
+            "document.querySelector('.onetrust-close-btn-handler')?.click()",
+            # Generic consent banners
+            "document.querySelector('[class*=\"cookie-accept\"], [class*=\"consent-accept\"]')?.click()",
+            "document.querySelector('button[id*=\"accept\"], button[class*=\"accept\"]')?.click()",
+        ]:
             try:
-                page.goto(url, wait_until="domcontentloaded", timeout=60000)
-            except Exception as exc:
-                log.info(f"   [cookies] Page load warning: {exc}")
-
-            # Auto-dismiss cookie consent popups (common on Elsevier/Cell/Wiley/etc.)
-            time.sleep(2)
-            for js in [
-                # Elsevier/Cell cookie banner
-                "document.querySelector('#onetrust-accept-btn-handler')?.click()",
-                # OneTrust general
-                "document.querySelector('.onetrust-close-btn-handler')?.click()",
-                # Generic consent banners
-                "document.querySelector('[class*=\"cookie-accept\"], [class*=\"consent-accept\"]')?.click()",
-                "document.querySelector('button[id*=\"accept\"], button[class*=\"accept\"]')?.click()",
-            ]:
-                try:
-                    page.evaluate(js)
-                except Exception:
-                    pass
-
-            # Wait for user to close browser
-            try:
-                page.wait_for_event("close", timeout=max_wait * 1000)
+                page.evaluate(js)
             except Exception:
                 pass
 
-            # Capture all cookies
-            all_cookies = context.cookies()
+        # Wait for user to close browser
+        try:
+            page.wait_for_event("close", timeout=max_wait * 1000)
+        except Exception:
+            pass
+
+        # Capture all cookies
+        all_cookies = context.cookies()
 
         if not all_cookies:
+            browser.close()
             return {
                 "success": False,
                 "message": "未捕获到 cookies。请确保已登录机构账号。",
@@ -186,6 +186,8 @@ def extract_via_camofox(
         except Exception:
             pass
 
+        browser.close()
+
         domains_found = list({c.get("domain", "").lstrip(".") for c in save_cookies})[:10]
         return {
             "success": True,
@@ -205,15 +207,27 @@ def extract_via_camofox(
 
 
 def load_saved_cookies(config: dict[str, Any]) -> list[dict[str, Any]]:
-    """Load previously saved publisher cookies."""
+    """Load previously saved publisher cookies, filtering out expired ones."""
     from .config import DATA_DIR
     cookie_file = Path(config.get("cache_dir", str(DATA_DIR / "cache"))) / "publisher_cookies.json"
     if not cookie_file.exists():
         return []
     try:
-        return json.loads(cookie_file.read_text(encoding="utf-8"))
+        cookies = json.loads(cookie_file.read_text(encoding="utf-8"))
     except Exception:
         return []
+    now = time.time()
+    return [c for c in cookies if _is_cookie_valid(c, now)]
+
+
+def _is_cookie_valid(cookie: dict[str, Any], now: float | None = None) -> bool:
+    """Check if a cookie is not expired. expires=0 means session cookie (always valid)."""
+    expires = cookie.get("expires", 0)
+    if not expires or expires == 0:
+        return True
+    if now is None:
+        now = time.time()
+    return expires > now
 
 
 def inject_cookies(session: Any, config: dict[str, Any]) -> None:
@@ -221,6 +235,41 @@ def inject_cookies(session: Any, config: dict[str, Any]) -> None:
     cookies = load_saved_cookies(config)
     for c in cookies:
         session.cookies.set(c["name"], c["value"], domain=c.get("domain", ""), path=c.get("path", "/"))
+
+
+def merge_cookies(new_cookies: list[dict[str, Any]], config: dict[str, Any]) -> list[dict[str, Any]]:
+    """Merge new cookies into saved publisher cookies, dedup by (name, domain, path).
+
+    Filters to publisher domains only. Updates existing cookies in-place
+    (new value overwrites old) and appends genuinely new ones. Saves both
+    JSON and Netscape formats.
+
+    Returns the merged cookie list.
+    """
+    from .config import DATA_DIR
+
+    cache_dir = Path(config.get("cache_dir", str(DATA_DIR / "cache")))
+    cookie_file = cache_dir / "publisher_cookies.json"
+    netscape_file = cache_dir / "publisher_cookies.txt"
+
+    existing = load_saved_cookies(config)
+
+    # Build index of existing cookies by (name, domain, path)
+    key = lambda c: (c.get("name", ""), c.get("domain", ""), c.get("path", "/"))
+    merged: dict[tuple, dict[str, Any]] = {key(c): c for c in existing}
+
+    for c in new_cookies:
+        if not _is_publisher_cookie(c):
+            continue
+        merged[key(c)] = c
+
+    result = list(merged.values())
+
+    if result:
+        _save_cookies_json(result, cookie_file)
+        _save_cookies_netscape(result, netscape_file)
+
+    return result
 
 
 def _is_doi(text: str) -> bool:
@@ -236,7 +285,7 @@ def publisher_login(
     """Open browser for institutional login on a publisher article page.
 
     Takes a DOI or publisher name, resolves to the article page, and opens
-    a visible camoufox browser. User clicks "Access through your institution",
+    a visible stealth browser. User clicks "Access through your institution",
     completes SSO login, then closes the browser. Cookies are captured and
     imported into camofox-browser for automated downloads.
 

@@ -49,12 +49,12 @@ def _api_request(
         headers["Content-Type"] = "application/json"
         body_bytes = json.dumps(body).encode("utf-8")
 
-    pool = urllib3.PoolManager()
+    retry = urllib3.Retry(total=2, backoff_factor=1.0, status_forcelist=[503])
+    pool = urllib3.PoolManager(retries=retry)
     resp = pool.request(
         method, url,
         headers=headers, body=body_bytes,
         timeout=urllib3.Timeout(connect=timeout, read=timeout),
-        retries=False,
     )
     payload = json.loads(resp.data.decode("utf-8"))
     if resp.status >= 400:
@@ -116,8 +116,8 @@ def solve_url(
                 timeout=15.0,
             )
             html = eval_result.get("result", "")
-        except Exception:
-            pass
+        except Exception as e:
+            log.info(f"camofox: HTML eval failed: {e}")
 
         if not html:
             snapshot_text = snapshot.get("snapshot", "")
@@ -144,8 +144,8 @@ def solve_url(
                 for c in raw:
                     if isinstance(c, dict) and c.get("name"):
                         cookies.append({"name": c["name"], "value": c.get("value", "")})
-        except Exception:
-            pass
+        except Exception as e:
+            log.info(f"camofox: cookie extraction failed: {e}")
 
         log.info(f"camofox: ok, final_url={final_url}, html_len={len(html)}")
         return {
@@ -568,7 +568,8 @@ def get_captured_responses(
             timeout=10.0,
         )
         return result.get("responses", [])
-    except Exception:
+    except Exception as e:
+        log.info(f"camofox: get_captured_responses failed: {e}")
         return []
 
 

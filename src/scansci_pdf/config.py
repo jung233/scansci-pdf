@@ -36,6 +36,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "ezproxy_login_url": "",
     "core_api_key": "",
     "openalex_api_key": "",
+    "elsevier_api_key": "",
+    "elsevier_insttoken": "",
     "connect_timeout": 15,
     "read_timeout": 30,
     "request_delay_min": 2.0,
@@ -129,7 +131,7 @@ def update_config(key: str, value: str) -> dict[str, Any]:
 
 def get_config_safe() -> dict[str, Any]:
     config = load_config()
-    sensitive_keys = ["core_api_key", "vpnsci_cookie_file", "zotero_api_key", "zotero_library_id"]
+    sensitive_keys = ["core_api_key", "vpnsci_cookie_file", "zotero_api_key", "zotero_library_id", "elsevier_api_key", "elsevier_insttoken"]
     for key in sensitive_keys:
         if config.get(key):
             config[key] = "***"

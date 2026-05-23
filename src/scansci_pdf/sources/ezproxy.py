@@ -78,14 +78,14 @@ def _ezproxy_cookie_path(config: dict[str, Any]) -> Path:
 
 
 def ezproxy_login(config: dict[str, Any]) -> bool:
-    """Open browser for EZProxy login. Tries camoufox first, falls back to Selenium."""
-    # Try camoufox (stealth browser) first
+    """Open browser for EZProxy login. Tries stealth browser first, falls back to Selenium."""
+    # Try stealth browser (stealth browser) first
     try:
         from ..camofox_login import ezproxy_login as _camofox_ezproxy
         if _camofox_ezproxy(config):
             return True
     except Exception as exc:
-        log.info(f"   [EZProxy] camoufox login failed: {exc}")
+        log.info(f"   [EZProxy] stealth browser login failed: {exc}")
 
     # Fallback to Selenium
     try:

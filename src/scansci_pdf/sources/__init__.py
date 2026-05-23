@@ -418,7 +418,44 @@ def _run_tiers_parallel(
             log.info(f"   OK {label}")
             return result
 
-        log.info(f"   All sources timed out after {overall_timeout + 5}s")
+        # Timeout reached — give late-finishing threads a grace period.
+        # Visible browser login can take 60-300s (browser launch + SSO + redirect),
+        # so we wait much longer if browser-based sources are in the pool.
+        has_browser = any("Browser" in lbl for _, lbl, _, _ in all_sources)
+        has_carsi = any("CARSI" in lbl for _, lbl, _, _ in all_sources)
+        if has_carsi:
+            grace = 300
+        elif has_browser:
+            grace = 180
+        else:
+            grace = 15
+        log.info(f"   Racing timed out after {overall_timeout + 5}s, waiting up to {grace}s for late results...")
+        success_event.wait(timeout=grace)
+        if shared_result["result"] is not None:
+            result, label, src_output = shared_result["result"]
+            final_path = Path(result.get("file", ""))
+            if final_path != output_path and final_path.exists():
+                output_path.parent.mkdir(parents=True, exist_ok=True)
+                if output_path.exists():
+                    output_path.unlink()
+                final_path.rename(output_path)
+                result["file"] = str(output_path)
+            log.info(f"   OK {label} (late)")
+            return result
+
+        # Final scan: check if any source wrote a valid PDF file despite timeout
+        from ..pdf_utils import is_pdf_file
+        for label, src_output in futures.values():
+            if src_output.exists() and is_pdf_file(src_output):
+                output_path.parent.mkdir(parents=True, exist_ok=True)
+                if output_path.exists():
+                    output_path.unlink()
+                src_output.rename(output_path)
+                log.info(f"   OK {label} (file scan)")
+                return {"success": True, "identifier": doi, "doi": doi,
+                        "file": str(output_path), "source": label}
+
+        log.info(f"   All sources failed")
     finally:
         pool.shutdown(wait=False)
         # Cleanup temp files

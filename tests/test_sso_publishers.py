@@ -5,7 +5,7 @@ Usage:
     python -m tests.test_sso_publishers --list
     python -m tests.test_sso_publishers --report
 
-Interactive: opens a visible Camoufox browser for each publisher. You must
+Interactive: opens a visible CloakBrowser for each publisher. You must
 complete the CAS/SSO login in the browser window. The script detects
 success and moves on to the next publisher.
 
@@ -118,10 +118,9 @@ def test_publisher(
     }
 
     try:
-        from camoufox.sync_api import Camoufox
-        from camoufox.addons import DefaultAddons
+        from cloakbrowser import launch  # noqa: F401
     except ImportError:
-        result["error"] = "camoufox not installed"
+        result["error"] = "cloakbrowser not installed"
         return result
 
     sso_cfg = _PUBLISHER_SSO_CONFIG.get(publisher, _PUBLISHER_SSO_CONFIG["_default"])
@@ -132,215 +131,216 @@ def test_publisher(
     _log(f"{publisher}: starting test — {article_url[:70]}")
 
     try:
-        with Camoufox(headless=False, exclude_addons=[DefaultAddons.UBO]) as browser:
-            context = browser.new_context(viewport={"width": 1440, "height": 900})
-            page = context.new_page()
+        browser = launch(headless=False, humanize=True,
+                         args=["--disable-features=CrossOriginOpenerPolicy"])
+        context = browser.new_context(viewport={"width": 1440, "height": 900})
+        page = context.new_page()
 
-            # Step 1: Navigate to article
-            _log(f"  [{publisher}] loading article page...")
-            try:
-                page.goto(article_url, wait_until="domcontentloaded", timeout=60000)
-                time.sleep(5)
-            except Exception as exc:
-                _log(f"  [{publisher}] page load warning: {exc}")
+        # Step 1: Navigate to article
+        _log(f"  [{publisher}] loading article page...")
+        try:
+            page.goto(article_url, wait_until="domcontentloaded", timeout=60000)
+            time.sleep(5)
+        except Exception as exc:
+            _log(f"  [{publisher}] page load warning: {exc}")
 
-            title = page.title()
-            url = page.url
-            _log(f"  [{publisher}] page: '{title[:60]}'")
+        title = page.title()
+        url = page.url
+        _log(f"  [{publisher}] page: '{title[:60]}'")
 
-            result["checks"]["article_loaded"] = True
+        result["checks"]["article_loaded"] = True
 
-            # Step 2: Check if already authenticated (cookies from previous test)
-            already_on_auth = any(x in title for x in _AUTH_TITLES) or \
-                              any(x in url.lower() for x in _AUTH_KEYWORDS)
-            result["checks"]["already_on_auth"] = already_on_auth
+        # Step 2: Check if already authenticated (cookies from previous test)
+        already_on_auth = any(x in title for x in _AUTH_TITLES) or \
+                          any(x in url.lower() for x in _AUTH_KEYWORDS)
+        result["checks"]["already_on_auth"] = already_on_auth
 
-            html = page.content()
-            is_paywall = _detect_paywall_local(html)
-            is_cloudflare = not is_paywall and _detect_cloudflare(html)
+        html = page.content()
+        is_paywall = _detect_paywall_local(html)
+        is_cloudflare = not is_paywall and _detect_cloudflare(html)
 
-            result["checks"]["cloudflare"] = is_cloudflare
+        result["checks"]["cloudflare"] = is_cloudflare
 
-            if not is_paywall and not already_on_auth and not is_cloudflare:
-                _log(f"  [{publisher}] no paywall detected — may already have access")
-                result["checks"]["paywall_detected"] = False
-                result["passed"] = True
-                result["note"] = "No paywall — already authenticated or open access"
-                return result
+        if not is_paywall and not already_on_auth and not is_cloudflare:
+            _log(f"  [{publisher}] no paywall detected — may already have access")
+            result["checks"]["paywall_detected"] = False
+            result["passed"] = True
+            result["note"] = "No paywall — already authenticated or open access"
+            return result
 
-            if is_cloudflare:
-                _log(f"  [{publisher}] Cloudflare challenge detected — anti-bot may block SSO")
-                result["checks"]["paywall_detected"] = False
-                result["passed"] = False
-                result["error"] = "Cloudflare challenge — cannot test SSO"
-                return result
+        if is_cloudflare:
+            _log(f"  [{publisher}] Cloudflare challenge detected — anti-bot may block SSO")
+            result["checks"]["paywall_detected"] = False
+            result["passed"] = False
+            result["error"] = "Cloudflare challenge — cannot test SSO"
+            return result
 
-            result["checks"]["paywall_detected"] = True
+        result["checks"]["paywall_detected"] = True
 
-            # Step 3: Click SSO link
-            _log(f"  [{publisher}] clicking institutional login...")
-            url_before_click = page.url
-            page.evaluate(sso_cfg["sso_link_js"])
+        # Step 3: Click SSO link
+        _log(f"  [{publisher}] clicking institutional login...")
+        url_before_click = page.url
+        page.evaluate(sso_cfg["sso_link_js"])
 
-            # Wait for Cloudflare + OpenAthens auto-redirect
-            _log(f"  [{publisher}] waiting for SSO page to resolve (Cloudflare + OpenAthens)...")
-            for _ in range(20):
+        # Wait for Cloudflare + OpenAthens auto-redirect
+        _log(f"  [{publisher}] waiting for SSO page to resolve (Cloudflare + OpenAthens)...")
+        for _ in range(20):
+            time.sleep(3)
+            url_now = page.url
+            title_now = page.title()
+            # Stop waiting once we reach CAS/OpenAthens/IDP (beyond ssostart)
+            if ("openathens" in url_now.lower()
+                or idp_en.lower() in url_now.lower()
+                or "cas" in url_now.lower() or "/idp/" in url_now.lower()):
+                break
+
+        title_after = page.title()
+        url_after = page.url
+        _log(f"  [{publisher}] after SSO click: '{title_after[:50]}' {url_after[:60]}")
+        result["checks"]["sso_clicked"] = True
+
+        # Check if the SSO link actually caused navigation
+        if url_after == url_before_click and title_after == title:
+            _log(f"  [{publisher}] WARNING: page did not change after SSO click — link may be stale")
+            result["checks"]["sso_navigated"] = False
+        else:
+            result["checks"]["sso_navigated"] = True
+
+        # Step 4: Search for institution ONLY if still on WAYF page (not auto-redirected)
+        search_found = False
+        still_on_wayf = not any(x in page.url.lower() for x in ('openathens', idp_en.lower(), 'cas', 'idp'))
+        if still_on_wayf:
+            for sel in sso_cfg["search_selectors"]:
+                si = page.query_selector(sel)
+                if si:
+                    si.fill(idp_en)
+                    _log(f"  [{publisher}] searched '{idp_en}' via {sel}")
+                    time.sleep(3)
+
+                    # Click matching result
+                    clicked = page.evaluate(f"""
+                        (name) => {{
+                            const items = document.querySelectorAll(
+                                '[class*="result"], [class*="suggestion"], [class*="federation"], li, a, button');
+                            for (const el of items) {{
+                                if (el.textContent.includes(name) && el.offsetParent !== null) {{
+                                    el.click();
+                                    return true;
+                                }}
+                            }}
+                            return false;
+                        }}
+                    """, idp_en)
+                    if clicked:
+                        _log(f"  [{publisher}] selected institution '{idp_en}'")
+                        time.sleep(5)
+                    search_found = True
+                    break
+        else:
+            _log(f"  [{publisher}] auto-redirected to CAS/OpenAthens — skipping institution search")
+            search_found = True  # Auto-redirect is success
+
+        result["checks"]["institution_search_found"] = search_found
+
+        # Step 5: Wait for CAS login
+        needs_cas = any(x in page.title() for x in _AUTH_TITLES) or \
+                    any(x in page.url.lower() for x in _AUTH_KEYWORDS)
+
+        if needs_cas:
+            result["checks"]["cas_required"] = True
+            print(f"\n  >>> [{publisher}] 请在浏览器中完成 CAS 登录 <<<\n")
+
+            deadline = time.time() + timeout_per_publisher
+            login_ok = False
+            while time.time() < deadline:
                 time.sleep(3)
-                url_now = page.url
-                title_now = page.title()
-                # Stop waiting once we reach CAS/OpenAthens/IDP (beyond ssostart)
-                if ("openathens" in url_now.lower()
-                    or idp_en.lower() in url_now.lower()
-                    or "cas" in url_now.lower() or "/idp/" in url_now.lower()):
+                try:
+                    t = page.title()
+                    u = page.url
+                except Exception:
+                    break
+                is_auth = any(x in t for x in _AUTH_TITLES)
+                is_auth_url = any(x in u.lower() for x in _AUTH_KEYWORDS)
+                if not is_auth and not is_auth_url:
+                    login_ok = True
                     break
 
-            title_after = page.title()
-            url_after = page.url
-            _log(f"  [{publisher}] after SSO click: '{title_after[:50]}' {url_after[:60]}")
-            result["checks"]["sso_clicked"] = True
-
-            # Check if the SSO link actually caused navigation
-            if url_after == url_before_click and title_after == title:
-                _log(f"  [{publisher}] WARNING: page did not change after SSO click — link may be stale")
-                result["checks"]["sso_navigated"] = False
-            else:
-                result["checks"]["sso_navigated"] = True
-
-            # Step 4: Search for institution ONLY if still on WAYF page (not auto-redirected)
-            search_found = False
-            still_on_wayf = not any(x in page.url.lower() for x in ('openathens', idp_en.lower(), 'cas', 'idp'))
-            if still_on_wayf:
-                for sel in sso_cfg["search_selectors"]:
-                    si = page.query_selector(sel)
-                    if si:
-                        si.fill(idp_en)
-                        _log(f"  [{publisher}] searched '{idp_en}' via {sel}")
-                        time.sleep(3)
-
-                        # Click matching result
-                        clicked = page.evaluate(f"""
-                            (name) => {{
-                                const items = document.querySelectorAll(
-                                    '[class*="result"], [class*="suggestion"], [class*="federation"], li, a, button');
-                                for (const el of items) {{
-                                    if (el.textContent.includes(name) && el.offsetParent !== null) {{
-                                        el.click();
-                                        return true;
-                                    }}
-                                }}
-                                return false;
-                            }}
-                        """, idp_en)
-                        if clicked:
-                            _log(f"  [{publisher}] selected institution '{idp_en}'")
-                            time.sleep(5)
-                        search_found = True
-                        break
-            else:
-                _log(f"  [{publisher}] auto-redirected to CAS/OpenAthens — skipping institution search")
-                search_found = True  # Auto-redirect is success
-
-            result["checks"]["institution_search_found"] = search_found
-
-            # Step 5: Wait for CAS login
-            needs_cas = any(x in page.title() for x in _AUTH_TITLES) or \
-                        any(x in page.url.lower() for x in _AUTH_KEYWORDS)
-
-            if needs_cas:
-                result["checks"]["cas_required"] = True
-                print(f"\n  >>> [{publisher}] 请在浏览器中完成 CAS 登录 <<<\n")
-
-                deadline = time.time() + timeout_per_publisher
-                login_ok = False
-                while time.time() < deadline:
-                    time.sleep(3)
-                    try:
-                        t = page.title()
-                        u = page.url
-                    except Exception:
-                        break
-                    is_auth = any(x in t for x in _AUTH_TITLES)
-                    is_auth_url = any(x in u.lower() for x in _AUTH_KEYWORDS)
-                    if not is_auth and not is_auth_url:
-                        login_ok = True
-                        break
-
-                if not login_ok:
-                    _log(f"  [{publisher}] CAS login TIMED OUT")
-                    result["error"] = "CAS login timed out"
-                    return result
-
-                _log(f"  [{publisher}] CAS login succeeded!")
-                result["checks"]["cas_login_ok"] = True
-                time.sleep(3)
-            else:
-                result["checks"]["cas_required"] = False
-
-            # Step 6: Verify — check no paywall on current page
-            html_after = page.content()
-            still_paywall = _detect_paywall_local(html_after)
-            result["checks"]["paywall_after_login"] = still_paywall
-
-            if still_paywall:
-                _log(f"  [{publisher}] still paywalled after login")
-                result["error"] = "Still paywalled after login"
+            if not login_ok:
+                _log(f"  [{publisher}] CAS login TIMED OUT")
+                result["error"] = "CAS login timed out"
                 return result
 
-            # Step 7: Try PDF fetch via in-browser JS
-            _log(f"  [{publisher}] trying PDF fetch post-login...")
-            pdf_paths = sso_cfg["pdf_paths"](doi)
-            import base64
-            pdf_b64 = page.evaluate(f"""
-                (async () => {{
-                    const paths = {json.dumps(pdf_paths)};
-                    for (const p of paths) {{
-                        try {{
-                            const resp = await fetch(p, {{credentials: 'include',
-                                headers: {{'Accept': 'application/pdf,*/*'}}}});
-                            if (!resp.ok) return 'status:' + resp.status;
-                            const ct = resp.headers.get('content-type') || '';
-                            if (!ct.includes('pdf') && !ct.includes('octet'))
-                                return 'ct:' + ct.substring(0, 50);
-                            const blob = await resp.blob();
-                            return new Promise((resolve) => {{
-                                const reader = new FileReader();
-                                reader.onload = () => resolve(reader.result);
-                                reader.readAsDataURL(blob);
-                            }});
-                        }} catch(e) {{ return 'error:' + e.message; }}
-                    }}
-                    return null;
-                }})()
-            """)
+            _log(f"  [{publisher}] CAS login succeeded!")
+            result["checks"]["cas_login_ok"] = True
+            time.sleep(3)
+        else:
+            result["checks"]["cas_required"] = False
 
-            if isinstance(pdf_b64, str) and pdf_b64.startswith("data:"):
-                _, data = pdf_b64.split(",", 1)
-                pdf_bytes = base64.b64decode(data)
-                if pdf_bytes[:5] == b"%PDF-" and len(pdf_bytes) > 5000:
-                    _log(f"  [{publisher}] PDF fetched successfully! {len(pdf_bytes)} bytes")
-                    result["passed"] = True
-                    result["checks"]["pdf_fetched"] = True
-                    return result
+        # Step 6: Verify — check no paywall on current page
+        html_after = page.content()
+        still_paywall = _detect_paywall_local(html_after)
+        result["checks"]["paywall_after_login"] = still_paywall
 
-            # Step 8: Check if page shows PDF link
-            has_pdf_link = page.evaluate("""
-                (() => {
-                    for (const a of document.querySelectorAll('a')) {
-                        const href = (a.href || '').toLowerCase();
-                        if (href.includes('/pdf/') || href.includes('pdfdirect') ||
-                            href.includes('.pdf') || href.includes('showPdf')) {
-                            return true;
-                        }
+        if still_paywall:
+            _log(f"  [{publisher}] still paywalled after login")
+            result["error"] = "Still paywalled after login"
+            return result
+
+        # Step 7: Try PDF fetch via in-browser JS
+        _log(f"  [{publisher}] trying PDF fetch post-login...")
+        pdf_paths = sso_cfg["pdf_paths"](doi)
+        import base64
+        pdf_b64 = page.evaluate(f"""
+            (async () => {{
+                const paths = {json.dumps(pdf_paths)};
+                for (const p of paths) {{
+                    try {{
+                        const resp = await fetch(p, {{credentials: 'include',
+                            headers: {{'Accept': 'application/pdf,*/*'}}}});
+                        if (!resp.ok) return 'status:' + resp.status;
+                        const ct = resp.headers.get('content-type') || '';
+                        if (!ct.includes('pdf') && !ct.includes('octet'))
+                            return 'ct:' + ct.substring(0, 50);
+                        const blob = await resp.blob();
+                        return new Promise((resolve) => {{
+                            const reader = new FileReader();
+                            reader.onload = () => resolve(reader.result);
+                            reader.readAsDataURL(blob);
+                        }});
+                    }} catch(e) {{ return 'error:' + e.message; }}
+                }}
+                return null;
+            }})()
+        """)
+
+        if isinstance(pdf_b64, str) and pdf_b64.startswith("data:"):
+            _, data = pdf_b64.split(",", 1)
+            pdf_bytes = base64.b64decode(data)
+            if pdf_bytes[:5] == b"%PDF-" and len(pdf_bytes) > 5000:
+                _log(f"  [{publisher}] PDF fetched successfully! {len(pdf_bytes)} bytes")
+                result["passed"] = True
+                result["checks"]["pdf_fetched"] = True
+                return result
+
+        # Step 8: Check if page shows PDF link
+        has_pdf_link = page.evaluate("""
+            (() => {
+                for (const a of document.querySelectorAll('a')) {
+                    const href = (a.href || '').toLowerCase();
+                    if (href.includes('/pdf/') || href.includes('pdfdirect') ||
+                        href.includes('.pdf') || href.includes('showPdf')) {
+                        return true;
                     }
-                    return false;
-                })()
-            """)
-            result["checks"]["pdf_link_found"] = bool(has_pdf_link)
+                }
+                return false;
+            })()
+        """)
+        result["checks"]["pdf_link_found"] = bool(has_pdf_link)
 
-            # If we got here without paywall, consider it passing
-            result["passed"] = not still_paywall
-            if result["passed"]:
-                result["note"] = "Login OK but PDF not fetched — may need page-level extraction"
+        # If we got here without paywall, consider it passing
+        result["passed"] = not still_paywall
+        if result["passed"]:
+            result["note"] = "Login OK but PDF not fetched — may need page-level extraction"
 
         return result
 
@@ -348,6 +348,12 @@ def test_publisher(
         _log(f"  [{publisher}] ERROR: {exc}")
         result["error"] = str(exc)
         return result
+
+    finally:
+        try:
+            browser.close()
+        except Exception:
+            pass
 
 
 def main() -> None:

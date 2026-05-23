@@ -50,11 +50,21 @@ def scansci_pdf_smart_download(
     )
     # Add actionable guidance on failure
     if not result.get("success"):
-        result["hint"] = (
+        doi = result.get("doi", result.get("identifier", ""))
+        hint = (
             "下载失败。可能原因：1) 网络受限 → 运行 scansci-pdf login 配置机构代理 "
             "2) Sci-Hub 被封锁 → Tor 会自动尝试，检查 scansci-pdf camofox-status "
             "3) 论文太新或未收录 → 尝试机构代理下载"
         )
+        result["hint"] = {"message": hint}
+        # Elsevier papers: suggest API key
+        if doi.startswith("10.1016/"):
+            config = load_config()
+            if not config.get("elsevier_api_key"):
+                result["hint"]["elsevier_setup"] = (
+                    "Elsevier 论文可通过 API Key 直接下载（1-2秒），免费申请。"
+                    "请运行 scansci_pdf_elsevier_setup 获取配置指引。"
+                )
     return json.dumps(result, ensure_ascii=False)
 
 
@@ -85,8 +95,8 @@ def scansci_pdf_download(
     if not result.get("success"):
         error_type = result.get("error_type", "")
         action = result.get("action", "")
+        doi = result.get("doi", result.get("identifier", ""))
         if error_type == "paywall" or action == "login_required":
-            doi = result.get("doi", result.get("identifier", ""))
             result["agent_hint"] = (
                 f"此论文需要机构登录才能下载。请运行 scansci_pdf_login(identifier=\"{doi}\") "
                 "打开浏览器让用户登录机构账号，登录后关闭浏览器，然后重试下载。"
@@ -96,6 +106,17 @@ def scansci_pdf_download(
                 "Cloudflare 防护阻止访问。请提示用户启动 camofox-browser（端口 9377），"
                 "或配置代理后重试。"
             )
+        # Elsevier papers: suggest API key setup
+        if doi.startswith("10.1016/"):
+            config = load_config()
+            if not config.get("elsevier_api_key"):
+                result.setdefault("hint", {})
+                if isinstance(result.get("hint"), str):
+                    result["hint"] = {"message": result["hint"]}
+                result["hint"]["elsevier_setup"] = (
+                    "Elsevier 论文可通过 API Key 直接下载（1-2秒），免费申请。"
+                    "请运行 scansci_pdf_elsevier_setup 获取配置指引。"
+                )
 
     return json.dumps(result, ensure_ascii=False)
 
@@ -333,8 +354,91 @@ def scansci_pdf_auto_setup() -> str:
     report["status"]["webvpn"] = "configured" if config.get("vpnsci_enabled") else "not_configured"
     report["status"]["carsi"] = "configured" if config.get("carsi_enabled") else "not_configured"
 
+    # 5. Check Elsevier API key
+    if config.get("elsevier_api_key"):
+        report["status"]["elsevier_api"] = "configured"
+        report["actions"].append("Elsevier API key configured (ScienceDirect fast-track enabled)")
+    else:
+        report["status"]["elsevier_api"] = "not_configured"
+        report["actions"].append(
+            "Elsevier API key not set — ScienceDirect downloads will use browser fallback. "
+            "Run scansci_pdf_elsevier_setup to configure (free, recommended)."
+        )
+
     report["summary"] = "Ready to download. Use scansci_pdf_smart_download with a DOI."
     return json.dumps(report, ensure_ascii=False, indent=2)
+
+
+@mcp_app.tool()
+def scansci_pdf_elsevier_setup(test: bool = False) -> str:
+    """Setup Elsevier API key for ScienceDirect fast-track access.
+
+    Opens the Elsevier Developer Portal in browser for key registration,
+    guides the user through the process, and validates the configured key.
+
+    Args:
+        test: If True, test the configured key by downloading a sample paper.
+    """
+    import webbrowser
+    config = load_config()
+    api_key = config.get("elsevier_api_key", "")
+
+    result: dict[str, Any] = {}
+
+    if api_key:
+        result["status"] = "configured"
+        result["key_preview"] = f"{api_key[:8]}...{api_key[-4:]}"
+        result["message"] = "Elsevier API key 已配置。"
+
+        if test:
+            # Validate by hitting the serial title API (lightweight, no PDF download)
+            import requests
+            from .network import USER_AGENT
+            try:
+                s = requests.Session()
+                s.trust_env = False
+                proxy = config.get("network_proxy", "")
+                if proxy:
+                    s.proxies = {"http": proxy, "https": proxy}
+                resp = s.get(
+                    "https://api.elsevier.com/content/serial/title",
+                    headers={"Accept": "application/json", "X-ELS-APIKey": api_key, "User-Agent": USER_AGENT},
+                    params={"count": 1},
+                    timeout=15,
+                )
+                if resp.status_code == 200:
+                    result["test"] = "passed"
+                    result["message"] += " API Key 验证有效！ScienceDirect 论文可直接 API 下载。"
+                else:
+                    result["test"] = "failed"
+                    result["message"] += f" API Key 验证失败（HTTP {resp.status_code}），请检查 key 是否正确。"
+            except Exception as e:
+                result["test"] = "error"
+                result["message"] += f" 验证请求失败: {e}"
+        else:
+            result["message"] += " 运行 scansci_pdf_elsevier_setup(test=true) 验证 key 有效性。"
+    else:
+        result["status"] = "not_configured"
+        # Open browser to Elsevier Developer Portal
+        try:
+            webbrowser.open("https://dev.elsevier.com/")
+            result["browser_opened"] = True
+        except Exception:
+            result["browser_opened"] = False
+
+        result["message"] = (
+            "Elsevier API Key 未配置。请按以下步骤操作：\n\n"
+            "1. 浏览器已打开 Elsevier Developer Portal（如未打开请访问 https://dev.elsevier.com/）\n"
+            "2. 注册或登录你的 Elsevier 账号（个人邮箱即可，免费）\n"
+            "3. 点击 \"My API Key\" → \"Create new key\"\n"
+            "4. 应用名称随意填写，选择 \"ScienceDirect Article Retrieval\" API\n"
+            "5. 复制生成的 API Key（32位字符串）\n"
+            "6. 运行配置命令：\n"
+            "   scansci_pdf_config_set(key=\"elsevier_api_key\", value=\"你的APIKey\")\n\n"
+            "配置后所有 Elsevier/ScienceDirect/Cell Press 论文自动走 API 直接下载（1-2秒）。"
+        )
+
+    return json.dumps(result, ensure_ascii=False, indent=2)
 
 
 @mcp_app.tool()
@@ -631,6 +735,7 @@ def scansci_pdf_carsi_status() -> str:
     return json.dumps({
         "carsi_enabled": True,
         "carsi_idp_name": idp_name,
+        "hint": f"当前学校: {idp_name}。如需更换，运行 scansci_pdf_config_set key=carsi_idp_name value=新学校名称" if idp_name else "未设置学校。运行 scansci_pdf_config_set key=carsi_idp_name value=你的学校名称",
         "publishers": publishers,
     }, ensure_ascii=False)
 

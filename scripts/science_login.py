@@ -26,8 +26,7 @@ print(f"Opening: {url}")
 print("Log in with your institution. Script will auto-detect when done.")
 print()
 
-from camoufox.sync_api import Camoufox
-from camoufox.addons import DefaultAddons
+from cloakbrowser import launch
 
 LOGIN_INDICATORS = [
     'sign out', 'signout', 'log out', 'logout',
@@ -62,37 +61,43 @@ def _save_all(context, config, cookie_file):
     return cookies
 
 
-with Camoufox(headless=False, exclude_addons=[DefaultAddons.UBO]) as browser:
-    context = browser.new_context()
-    page = context.new_page()
-    page.goto(url, wait_until="domcontentloaded", timeout=60000)
+browser = launch(headless=False, humanize=True,
+                 args=["--disable-features=CrossOriginOpenerPolicy"])
+context = browser.new_context()
+page = context.new_page()
+page.goto(url, wait_until="domcontentloaded", timeout=60000)
 
-    logged_in = False
-    for i in range(180):  # 3 min max
-        time.sleep(1)
-        try:
-            _ = page.url
-        except Exception:
-            print("\nBrowser closed.")
-            break
+logged_in = False
+for i in range(180):  # 3 min max
+    time.sleep(1)
+    try:
+        _ = page.url
+    except Exception:
+        print("\nBrowser closed.")
+        break
 
-        if not logged_in and _check_logged_in(page):
-            logged_in = True
-            print(f"\nLogin detected! Saving cookies...")
-            _save_all(context, config, cookie_file)
-            print("You can close the browser now.")
-            break
-
-        if (i + 1) % 10 == 0:
-            print(".", end="", flush=True)
-
-    if not logged_in:
-        # Save whatever we have when browser closes or timeout
-        print("\nSaving cookies from current session...")
+    if not logged_in and _check_logged_in(page):
+        logged_in = True
+        print(f"\nLogin detected! Saving cookies...")
         _save_all(context, config, cookie_file)
+        print("You can close the browser now.")
+        break
 
-    # Final save
-    cookies = _save_all(context, config, cookie_file)
-    for c in cookies:
-        print(f"  {c['name']}: {c['value'][:40]}")
-    print("\nDone!")
+    if (i + 1) % 10 == 0:
+        print(".", end="", flush=True)
+
+if not logged_in:
+    # Save whatever we have when browser closes or timeout
+    print("\nSaving cookies from current session...")
+    _save_all(context, config, cookie_file)
+
+# Final save
+cookies = _save_all(context, config, cookie_file)
+for c in cookies:
+    print(f"  {c['name']}: {c['value'][:40]}")
+print("\nDone!")
+
+try:
+    browser.close()
+except Exception:
+    pass

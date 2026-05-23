@@ -111,7 +111,7 @@ PUBLISHER_TOOL_MAP: dict[str, list[str]] = {
     "MDPI": ["MDPIDirect", "Crossref", "Unpaywall"],
     "arXiv": ["arXiv"],
     "bioRxiv": ["arXiv", "Unpaywall"],
-    "Elsevier": ["ElsevierBrowser", "Crossref", "Unpaywall"],
+    "Elsevier": ["Crossref", "Unpaywall", "ElsevierAPI", "ElsevierBrowser"],
     "Wiley": ["WileyBrowser", "Crossref", "Unpaywall"],
     "Science": ["ScienceDirect", "ScienceBrowser", "Crossref", "Unpaywall"],
     "PNAS": ["PNASDirect", "Crossref", "Unpaywall"],
@@ -604,6 +604,12 @@ def get_publisher(doi: str) -> str:
     return ""
 
 
+def _elsevier_api_fn() -> Any:
+    """Lazy import of the Elsevier API download function."""
+    from ..publisher_strategies import try_elsevier_api
+    return try_elsevier_api
+
+
 def _browser_strategy(publisher: str) -> Any:
     """Create a browser download function for a publisher."""
     from ..publisher_strategies import (
@@ -666,6 +672,8 @@ _FN_MAP.update({
     "PLOSDirect": try_plos_direct,
     "FrontiersDirect": try_frontiers_direct,
     "BMCDirect": try_bmc_direct,
+    # API strategies
+    "ElsevierAPI": _elsevier_api_fn(),
     # Browser strategies via camofox
     "ElsevierBrowser": _browser_strategy("Elsevier"),
     "WileyBrowser": _browser_strategy("Wiley"),

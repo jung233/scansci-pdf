@@ -40,7 +40,7 @@ def try_carsi(doi: str, output_path: Path, config: dict[str, Any]) -> dict[str, 
         log.info(f"   [CARSI] Trying {publisher} via {idp_name} for {doi}")
         client = CARSIClient(config)
 
-        # Try Camoufox first (stealth browser, handles Cloudflare)
+        # Try stealth browser first (stealth browser, handles Cloudflare)
         result = client.download_via_camofox(doi, resolved_url, output_path)
         if result:
             return result

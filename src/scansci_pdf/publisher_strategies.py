@@ -1,4 +1,4 @@
-"""Publisher-specific browser download strategies via camofox.
+"""Publisher-specific browser download strategies.
 
 Implements tailored download paths for major academic publishers,
 handling anti-bot challenges, PDF viewers, and publisher-specific DOM structures.
@@ -7,12 +7,20 @@ Inspired by ref-downloader's publisher strategy registry.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import re
 import time
 from pathlib import Path
 from typing import Any
 
+try:
+    from cloakbrowser import launch, launch_persistent_context
+    _HAS_CLOAKBROWSER = True
+except ImportError:
+    launch = None  # type: ignore[assignment]
+    launch_persistent_context = None  # type: ignore[assignment]
+    _HAS_CLOAKBROWSER = False
 from .log import get_logger
 
 log = get_logger()
@@ -37,6 +45,124 @@ def _clear_error() -> None:
     global _last_error_type, _last_error_action
     _last_error_type = ""
     _last_error_action = ""
+
+
+def _get_profile_dir(config: dict[str, Any], publisher: str = "shared") -> Path:
+    from .config import DATA_DIR
+    cache_dir = Path(config.get("cache_dir", str(DATA_DIR / "cache")))
+    profile_dir = cache_dir / f"publisher_profile_{publisher.lower()}"
+    profile_dir.mkdir(parents=True, exist_ok=True)
+    return profile_dir
+
+
+def _restore_cookies_to_context(context: Any, config: dict[str, Any]) -> None:
+    try:
+        from .browser_cookies import load_saved_cookies
+        saved = load_saved_cookies(config)
+        if saved:
+            pw_cookies = []
+            for c in saved:
+                pw_c = {"name": c.get("name", ""), "value": c.get("value", ""),
+                         "domain": c.get("domain", ""), "path": c.get("path", "/")}
+                if pw_c["domain"]:
+                    pw_cookies.append(pw_c)
+            if pw_cookies:
+                context.add_cookies(pw_cookies)
+    except Exception:
+        pass
+
+
+@contextlib.contextmanager
+def _visible_camofox(config: dict[str, Any], publisher: str, *, viewport: dict | None = None):
+    """Open visible CloakBrowser with persistent profile. Falls back to ephemeral."""
+    if not _HAS_CLOAKBROWSER:
+        raise RuntimeError("cloakbrowser not installed. Run: pip install cloakbrowser")
+    profile_dir = _get_profile_dir(config, publisher)
+    browser = None
+
+    try:
+        ctx = launch_persistent_context(
+            str(profile_dir),
+            headless=False, humanize=True,
+            args=["--disable-features=CrossOriginOpenerPolicy"],
+        )
+        page = ctx.new_page()
+        log.info(f"   [{publisher}] persistent browser profile: {profile_dir}")
+    except Exception as _e:
+        log.info(f"   [{publisher}] persistent context unavailable ({_e}), using ephemeral")
+        _vp = viewport or {"width": 1440, "height": 900}
+        browser = launch(headless=False, humanize=True,
+                         args=["--disable-features=CrossOriginOpenerPolicy"])
+        ctx = browser.new_context(viewport=_vp)
+        _restore_cookies_to_context(ctx, config)
+        page = ctx.new_page()
+
+    try:
+        yield ctx, page
+    finally:
+        try:
+            if browser:
+                browser.close()
+            else:
+                ctx.close()
+        except Exception:
+            pass
+
+
+def _save_all_cookie_formats(
+    cookies: list[dict[str, Any]],
+    publisher: str,
+    config: dict[str, Any],
+) -> None:
+    """Save cookies in all formats: JSON, Netscape, publisher subset, + bridge to camofox-browser."""
+    from .config import DATA_DIR
+    from .browser_cookies import cookies_to_netscape, _save_cookies_json
+
+    cache_dir = Path(config.get("cache_dir", str(DATA_DIR / "cache")))
+
+    # 1. Save full cookies to carsi_cookies/{publisher}.json
+    carsi_dir = cache_dir / "carsi_cookies"
+    carsi_dir.mkdir(parents=True, exist_ok=True)
+    cookie_data = [
+        {"name": c.get("name", ""), "value": c.get("value", ""),
+         "domain": c.get("domain", ""), "path": c.get("path", "/"),
+         "secure": c.get("secure", False), "expires": c.get("expires", 0),
+         "httpOnly": c.get("httpOnly", False)}
+        for c in cookies
+    ]
+    (carsi_dir / f"{publisher.lower()}.json").write_text(
+        json.dumps(cookie_data, indent=2, ensure_ascii=False), encoding="utf-8")
+
+    # 2. Save Netscape format (for camofox-browser import)
+    netscape_text = cookies_to_netscape(cookies)
+    netscape_file = cache_dir / "publisher_cookies.txt"
+    netscape_file.write_text(netscape_text, encoding="utf-8")
+
+    # 3. Save publisher-domain subset
+    _pub_domains = [
+        "wiley.com", "onlinelibrary.wiley.com", "elsevier.com", "sciencedirect.com",
+        "cell.com", "springer.com", "link.springer.com", "nature.com",
+        "ieee.org", "ieeexplore.ieee.org", "acs.org", "pubs.acs.org",
+        "rsc.org", "pubs.rsc.org", "tandfonline.com", "oup.com",
+        "academic.oup.com", "iop.org", "iopscience.iop.org",
+        "aps.org", "journals.aps.org", "aip.org", "pubs.aip.org",
+        "dl.acm.org", "acm.org", "science.org", "sciencemag.org",
+    ]
+    pub_cookies = [c for c in cookie_data
+                   if any(c.get("domain", "").endswith(d) for d in _pub_domains)]
+    if pub_cookies:
+        _save_cookies_json(pub_cookies, cache_dir / "publisher_cookies.json")
+
+    # 4. Bridge to camofox-browser headless service
+    try:
+        from .camofox import import_cookies, is_available
+        if is_available(config):
+            imported = import_cookies(str(netscape_file), config)
+            log.info(f"   [{publisher}] bridged {imported} cookies to camofox-browser service")
+    except Exception as _e:
+        log.info(f"   [{publisher}] camofox-browser bridge note: {_e}")
+
+    log.info(f"   [{publisher}] saved {len(cookies)} cookies in all formats")
 
 
 def _detect_paywall(html: str, status_code: int = 0) -> bool:
@@ -220,7 +346,7 @@ def _try_institutional_login(tab_id: str, config: dict[str, Any], publisher: str
 
     if needs_login:
         # camofox-browser is headless — user can't see the tab
-        # Open a visible Camoufox window for the CAS login
+        # Open a visible browser window for the CAS login
         log.info(f"   [{publisher}] CAS login required — opening visible browser...")
         return _visible_institutional_login(current_url, config, publisher, idp_name, idp_en, tab_id)
 
@@ -233,24 +359,14 @@ def _visible_institutional_login(
     cas_url: str, config: dict[str, Any], publisher: str,
     idp_name: str, idp_en: str, headless_tab_id: str,
 ) -> bool:
-    """Open a visible Camoufox browser for CAS login, then inject cookies back."""
-    try:
-        from camoufox.sync_api import Camoufox
-        from camoufox.addons import DefaultAddons
-    except ImportError:
-        log.info(f"   [{publisher}] camoufox not installed for visible login")
-        return False
-
+    """Open a visible browser for CAS login, then inject cookies back."""
     from .camofox import evaluate_js, navigate_tab, import_cookies
 
-    with Camoufox(headless=False, exclude_addons=[DefaultAddons.UBO]) as browser:
-        context = browser.new_context()
-        page = context.new_page()
+    with _visible_camofox(config, publisher, viewport=None) as (context, page):
 
         # Start from article page to get Cloudflare clearance, then do SSO flow
         article_url = evaluate_js(headless_tab_id, "window.location.href", config) or cas_url
-        import re as _re
-        doi_match = _re.search(r'10\.\d{4,}/[^\s?&]+', article_url)
+        doi_match = re.search(r'10\.\d{4,}/[^\s?&]+', article_url)
         doi_str = doi_match.group(0) if doi_match else ""
         from urllib.parse import urlparse as _urlparse
         parsed = _urlparse(article_url)
@@ -320,45 +436,9 @@ def _visible_institutional_login(
             is_auth_url = any(x in url.lower() for x in _AUTH_KEYWORDS)
             if not is_auth and not is_auth_url:
                 log.info(f"   [{publisher}] login successful in visible browser!")
-
-                # Extract ALL cookies from visible browser
                 try:
                     cookies = context.cookies()
-                    log.info(f"   [{publisher}] captured {len(cookies)} cookies from visible browser")
-
-                    # Save to Netscape file and import into camofox-browser
-                    from .config import DATA_DIR
-                    from .browser_cookies import cookies_to_netscape
-                    cache_dir = Path(config.get("cache_dir", str(DATA_DIR / "cache")))
-                    tmp_file = cache_dir / "_tmp_visible_login.txt"
-                    tmp_file.write_text(cookies_to_netscape(cookies), encoding="utf-8")
-                    imported = import_cookies(str(tmp_file), config)
-                    log.info(f"   [{publisher}] imported {imported} cookies into camofox session")
-
-                    # Also save as JSON for future use
-                    carsi_dir = cache_dir / "carsi_cookies"
-                    carsi_dir.mkdir(parents=True, exist_ok=True)
-                    publisher_lower = publisher.lower()
-                    cookie_data = [
-                        {"name": c.get("name", ""), "value": c.get("value", ""),
-                         "domain": c.get("domain", ""), "path": c.get("path", "/"),
-                         "secure": c.get("secure", False), "expires": c.get("expires", 0),
-                         "httpOnly": c.get("httpOnly", False)}
-                        for c in cookies
-                    ]
-                    (carsi_dir / f"{publisher_lower}.json").write_text(
-                        json.dumps(cookie_data, indent=2, ensure_ascii=False), encoding="utf-8")
-
-                    # Also save publisher subset to publisher_cookies.json
-                    from .browser_cookies import _save_cookies_json
-                    pub_domains = ["wiley.com", "onlinelibrary.wiley.com", "elsevier.com", "sciencedirect.com",
-                                   "springer.com", "link.springer.com", "nature.com", "ieee.org", "acs.org"]
-                    pub_cookies = [c for c in cookie_data
-                                   if any(c.get("domain", "").endswith(d) for d in pub_domains)]
-                    if pub_cookies:
-                        _save_cookies_json(pub_cookies, cache_dir / "publisher_cookies.json")
-
-                    log.info(f"   [{publisher}] saved cookies (carsi + publisher) to disk")
+                    _save_all_cookie_formats(cookies, publisher, config)
                 except Exception as e:
                     log.info(f"   [{publisher}] cookie save error: {e}")
                 return True
@@ -378,18 +458,11 @@ def _visible_browser_download(
     config: dict[str, Any],
     publisher: str,
 ) -> dict[str, Any] | None:
-    """Open a visible Camoufox browser for full SSO login + direct PDF download.
+    """Open a visible browser for full SSO login + direct PDF download.
 
     Works for any publisher. Uses _PUBLISHER_SSO_CONFIG for publisher-specific
     SSO link patterns, institution search selectors, and PDF fetch paths.
     """
-    try:
-        from camoufox.sync_api import Camoufox
-        from camoufox.addons import DefaultAddons
-    except ImportError:
-        log.info(f"   [{publisher}] camoufox not installed for visible download")
-        return None
-
     from .pdf_utils import is_pdf_file, success
     import base64
 
@@ -402,9 +475,20 @@ def _visible_browser_download(
     search_selectors = sso_cfg["search_selectors"]
     pdf_paths = sso_cfg["pdf_paths"](doi)
 
-    with Camoufox(headless=False, exclude_addons=[DefaultAddons.UBO]) as browser:
-        context = browser.new_context(viewport={"width": 1440, "height": 900})
-        page = context.new_page()
+    with _visible_camofox(config, publisher) as (context, page):
+
+        # For Elsevier DOIs, avoid linkinghub.elsevier.com by using direct URL
+        if publisher == "Elsevier" and ("doi.org/" in article_url or "linkinghub" in article_url):
+            cell_url = _build_cell_press_url(doi)
+            if cell_url:
+                log.info(f"   [{publisher}] bypassing linkinghub, using direct cell.com URL")
+                article_url = cell_url
+            else:
+                # Resolve DOI → sciencedirect.com PII URL via HTTP
+                sd_url = _resolve_elsevier_pii(doi, config)
+                if sd_url:
+                    log.info(f"   [{publisher}] bypassing linkinghub, using resolved URL")
+                    article_url = sd_url
 
         # Navigate to article page
         log.info(f"   [{publisher}] visible browser: opening {article_url[:60]}")
@@ -414,13 +498,47 @@ def _visible_browser_download(
         except Exception as exc:
             log.info(f"   [{publisher}] page load warning: {exc}")
 
+        # If stuck on linkinghub redirect, extract target and navigate directly
+        url = page.url
+        if "linkinghub" in url or ("retrieve/pii" in url and "Loading" in (page.title() or "")):
+            log.info(f"   [{publisher}] stuck on linkinghub, extracting direct URL...")
+            pii_match = re.search(r"pii/([A-Z0-9]+)", url)
+            if pii_match:
+                pii = pii_match.group(1)
+                # Try cell.com only if it's a known Cell Press journal, else sciencedirect.com
+                cell_url = _build_cell_press_url(doi) if publisher == "Elsevier" else None
+                direct_urls = []
+                if cell_url:
+                    direct_urls.append(cell_url)
+                direct_urls.append(f"https://www.sciencedirect.com/science/article/pii/{pii}")
+                for direct_url in direct_urls:
+                    try:
+                        page.goto(direct_url, wait_until="domcontentloaded", timeout=30000)
+                        time.sleep(5)
+                        if "linkinghub" not in page.url:
+                            log.info(f"   [{publisher}] navigated to {page.url[:60]}")
+                            break
+                    except Exception:
+                        pass
+
+        # Wait for Cloudflare challenge to resolve (visible browser can pass it)
+        for _cf_wait in range(6):
+            _cf_title = (page.title() or "").lower()
+            if any(_sig in _cf_title for _sig in ("just a moment", "attention required", "verify", "security check")):
+                log.info(f"   [{publisher}] Cloudflare challenge detected, waiting... ({_cf_wait+1}/6)")
+                time.sleep(5)
+            else:
+                break
+        else:
+            log.info(f"   [{publisher}] Cloudflare challenge did not resolve")
+
         title = page.title()
         url = page.url
         log.info(f"   [{publisher}] page: '{title[:40]}' {url[:60]}")
 
         # Check if already on auth page (previous cookies caused redirect)
-        already_on_auth = any(x in title for x in _AUTH_TITLES) or \
-                          any(x in url.lower() for x in _AUTH_KEYWORDS)
+        already_on_auth = any(x in (title or "") for x in _AUTH_TITLES) or \
+                          any(x in (url or "").lower() for x in _AUTH_KEYWORDS)
 
         # Try fetching PDF first — if it works, no login needed
         pdf_fetched = False
@@ -443,17 +561,31 @@ def _visible_browser_download(
             log.info(f"   [{publisher}] starting SSO login...")
             page.evaluate(sso_link_js)
             time.sleep(8)
-            title = page.title()
-            url = page.url
-            log.info(f"   [{publisher}] after SSO click: '{title[:30]}' {url[:60]}")
 
-            # Search for institution using publisher-specific selectors
+            # SSO click may have navigated the page or opened a popup
+            # Check all pages in the context for the SSO/IDP page
+            sso_page = page
+            for ctx_page in context.pages:
+                try:
+                    p_url = ctx_page.url
+                    p_title = ctx_page.title()
+                    if any(x in p_url.lower() for x in _AUTH_KEYWORDS) or \
+                       any(x in p_title for x in _AUTH_TITLES):
+                        sso_page = ctx_page
+                        log.info(f"   [{publisher}] SSO detected on tab: '{p_title[:30]}' {p_url[:60]}")
+                        break
+                except Exception:
+                    pass
+
+            log.info(f"   [{publisher}] after SSO click: '{sso_page.title()[:30] if sso_page else '?'}' {sso_page.url[:60] if sso_page else '?'}")
+
+            # Search for institution on the SSO page
             for sel in search_selectors:
-                si = page.query_selector(sel)
+                si = sso_page.query_selector(sel)
                 if si:
                     si.fill(idp_en)
                     time.sleep(3)
-                    clicked = page.evaluate(f"""
+                    clicked = sso_page.evaluate(f"""
                         (name) => {{
                             const items = document.querySelectorAll('[class*="result"], [class*="suggestion"], [class*="federation"], li, a, button');
                             for (const el of items) {{
@@ -477,14 +609,20 @@ def _visible_browser_download(
         login_ok = False
         for i in range(100):
             time.sleep(3)
-            try:
-                title = page.title()
-                url = page.url
-            except Exception:
-                break
-            is_auth = any(x in title for x in _AUTH_TITLES)
-            is_auth_url = any(x in url.lower() for x in _AUTH_KEYWORDS)
-            if not is_auth and not is_auth_url:
+            # Check ALL pages in context — SSO may happen in any tab
+            any_auth = False
+            for ctx_page in context.pages:
+                try:
+                    p_title = ctx_page.title()
+                    p_url = ctx_page.url
+                    is_auth = any(x in p_title for x in _AUTH_TITLES)
+                    is_auth_url = any(x in p_url.lower() for x in _AUTH_KEYWORDS)
+                    if is_auth or is_auth_url:
+                        any_auth = True
+                        break
+                except Exception:
+                    pass
+            if not any_auth:
                 login_ok = True
                 break
 
@@ -495,25 +633,20 @@ def _visible_browser_download(
         log.info(f"   [{publisher}] login successful, downloading PDF...")
         time.sleep(3)
 
-        # Save cookies for future use
+        # Save cookies for future use (all formats + bridge to camofox-browser)
         try:
             cookies = context.cookies()
-            from .config import DATA_DIR
-            cache_dir = Path(config.get("cache_dir", str(DATA_DIR / "cache")))
-            carsi_dir = cache_dir / "carsi_cookies"
-            carsi_dir.mkdir(parents=True, exist_ok=True)
-            cookie_data = [
-                {"name": c.get("name", ""), "value": c.get("value", ""),
-                 "domain": c.get("domain", ""), "path": c.get("path", "/"),
-                 "secure": c.get("secure", False), "expires": c.get("expires", 0),
-                 "httpOnly": c.get("httpOnly", False)}
-                for c in cookies
-            ]
-            (carsi_dir / f"{publisher.lower()}.json").write_text(
-                json.dumps(cookie_data, indent=2, ensure_ascii=False), encoding="utf-8")
-            log.info(f"   [{publisher}] saved {len(cookies)} cookies")
+            _save_all_cookie_formats(cookies, publisher, config)
         except Exception as e:
             log.info(f"   [{publisher}] cookie save note: {e}")
+
+        # Navigate back to the article page and reload to pick up auth cookies
+        log.info(f"   [{publisher}] reloading article page with new auth cookies...")
+        try:
+            page.goto(article_url, wait_until="domcontentloaded", timeout=30000)
+            time.sleep(5)
+        except Exception:
+            pass
 
         # Try downloading PDF via in-browser fetch (post-login)
         fetch_result = _try_browser_fetch_pdf(page, pdf_paths)
@@ -748,7 +881,7 @@ _PDF_LINK_SELECTORS: dict[str, list[str]] = {
 # ============================================================
 
 # Auth detection keywords for institutional login flows
-_AUTH_KEYWORDS = ("cas", "idp", "saml", "wayf", "auth", "sso", "passport", "accounts", "oauth")
+_AUTH_KEYWORDS = ("cas", "idp", "saml", "wayf", "sso", "passport", "accounts", "oauth", "/login", "/signin")
 _AUTH_TITLES = ("登录", "身份", "二次认证", "Login", "Sign in", "Log in")
 
 
@@ -758,16 +891,39 @@ def _school_auth_patterns(config: dict[str, Any]) -> tuple[str, ...]:
     Uses _IDP_MAP to translate the configured Chinese institution name to
     English, then lowercases it so the caller can match it against IDP URLs
     (e.g. 'tsinghua' matches 'id.tsinghua.edu.cn').
+
+    For universities not in _IDP_MAP, falls back to pinyin conversion
+    so that e.g. "兰州大学" → "lanzhou" can match "lzu.edu.cn" IDP URLs.
     """
     name = (config.get("carsi_idp_name", "") or "").strip()
     if not name:
         return ()
-    en = _IDP_MAP.get(name, name).lower()
+    en = _IDP_MAP.get(name, "").lower()
+    if not en:
+        # Dynamic fallback: try pinyin conversion for Chinese names
+        en = _chinese_to_pinyin_token(name).lower()
     if not en:
         return ()
     # Split multi-word names into individual tokens for broad matching
     tokens = tuple(t for t in en.replace("-", " ").split() if len(t) > 2)
     return tokens
+
+
+def _chinese_to_pinyin_token(name: str) -> str:
+    """Convert a Chinese university name to a pinyin token for URL matching.
+
+    E.g. "兰州大学" → "lanzhou", "哈尔滨工业大学" → "haerbingongye".
+    Falls back to empty string if pypinyin is not installed.
+    """
+    try:
+        from pypinyin import lazy_pinyin
+        return "".join(lazy_pinyin(name))
+    except ImportError:
+        pass
+    # Strip common suffixes and return what we have
+    for suffix in ("大学", "学院", "研究院"):
+        name = name.replace(suffix, "")
+    return name
 
 # Chinese → English university name mapping for institution search (CARSI/OpenAthens WAYF)
 _IDP_MAP: dict[str, str] = {
@@ -826,87 +982,79 @@ _INSTITUTION_CLICK_JS: str = (
 
 # Publisher-specific SSO configuration for visible browser download
 # Each entry: sso_link_js (JS to click institutional login), search_selectors, pdf_paths(doi)
+
+
+def _make_sso_click_js(*href_patterns: str, text_patterns: tuple[str, ...] = ()) -> str:
+    """Generate a JS IIFE that clicks the first <a> matching the given patterns.
+
+    Args:
+        href_patterns: Substrings to match against a.href (lowercased).
+        text_patterns: Substrings to match against a.innerText (lowercased).
+    """
+    conditions = " || ".join(f"href.includes('{p}')" for p in href_patterns)
+    if text_patterns:
+        text_conds = " || ".join(f"text.includes('{p}')" for p in text_patterns)
+        conditions = f"({conditions}) || ({text_conds})"
+    return f"""
+        (() => {{
+            const a = [...document.querySelectorAll('a')].find(a => {{
+                const href = (a.href || '').toLowerCase();
+                const text = (a.innerText || '').toLowerCase();
+                return {conditions};
+            }});
+            if (a) a.click();
+        }})()
+    """
+
+
+def _elsevier_pdf_paths(doi: str) -> list[str]:
+    """Build Elsevier/Cell Press PDF fetch paths from DOI."""
+    paths: list[str] = []
+    doi_suffix = doi.split("/", 1)[-1] if "/" in doi else doi
+    # Cell Press showPdf uses PII — try common Cell journal DOI patterns
+    import re
+    cell_url = _build_cell_press_url(doi)
+    if cell_url and "/abstract/" in cell_url:
+        pii = cell_url.split("/abstract/")[-1]
+        paths.append(f"/action/showPdf?pii={pii}")
+        paths.append(f"/science/article/pii/{pii}/pdfft")
+    # General ScienceDirect path with DOI
+    paths.append(f"/doi/pdfdirect/{doi}")
+    paths.append(f"/science/article/pii/{doi_suffix.replace('j.', 'j.')}/pdfft")
+    return paths
+
+
 _PUBLISHER_SSO_CONFIG: dict[str, dict[str, Any]] = {
     "Wiley": {
-        "sso_link_js": """
-            (() => {
-                const a = [...document.querySelectorAll('a')].find(a => a.href && a.href.includes('ssostart'));
-                if (a) a.click();
-            })()
-        """,
+        "sso_link_js": _make_sso_click_js("ssostart"),
         "search_selectors": ["#searchInstitution"],
         "pdf_paths": lambda doi: [f"/doi/pdfdirect/{doi}", f"/doi/pdf/{doi}"],
     },
     "Elsevier": {
-        "sso_link_js": """
-            (() => {
-                const a = [...document.querySelectorAll('a')].find(a => {
-                    const href = (a.href || '').toLowerCase();
-                    const text = (a.innerText || '').toLowerCase();
-                    return href.includes('shibboleth') || href.includes('institutional') ||
-                           text.includes('access through your institution') ||
-                           text.includes('institutional access');
-                });
-                if (a) a.click();
-            })()
-        """,
+        "sso_link_js": _make_sso_click_js("shibboleth", "institutional",
+                                           text_patterns=("access through your institution", "institutional access")),
         "search_selectors": ["#institution-search", "input[name='query']", "#bdd-email"],
-        "pdf_paths": lambda doi: [],  # Elsevier needs to find showPdf link on page
+        "pdf_paths": lambda doi: _elsevier_pdf_paths(doi),
     },
     "Springer": {
-        "sso_link_js": """
-            (() => {
-                const a = [...document.querySelectorAll('a')].find(a => {
-                    const href = (a.href || '').toLowerCase();
-                    return href.includes('shibboleth') || href.includes('institutional-login');
-                });
-                if (a) a.click();
-            })()
-        """,
+        "sso_link_js": _make_sso_click_js("shibboleth", "institutional-login"),
         "search_selectors": ["#idp-search", "input[name='idpSearch']", "#searchInstitution"],
         "pdf_paths": lambda doi: [f"/content/pdf/{doi}.pdf"],
     },
     "ACS": {
-        "sso_link_js": """
-            (() => {
-                const a = [...document.querySelectorAll('a')].find(a => {
-                    const href = (a.href || '').toLowerCase();
-                    return href.includes('shibboleth') || href.includes('institutional');
-                });
-                if (a) a.click();
-            })()
-        """,
+        "sso_link_js": _make_sso_click_js("shibboleth", "institutional"),
         "search_selectors": ["input[name='search']", "#searchInstitution"],
         "pdf_paths": lambda doi: [f"/doi/pdf/{doi}"],
     },
     "IEEE": {
-        "sso_link_js": """
-            (() => {
-                const a = [...document.querySelectorAll('a')].find(a => {
-                    const href = (a.href || '').toLowerCase();
-                    const text = (a.innerText || '').toLowerCase();
-                    return href.includes('shibboleth') || href.includes('institutional') ||
-                           text.includes('institutional sign in');
-                });
-                if (a) a.click();
-            })()
-        """,
+        "sso_link_js": _make_sso_click_js("shibboleth", "institutional",
+                                           text_patterns=("institutional sign in",)),
         "search_selectors": ["input[name='idpSearch']", "#searchInstitution"],
         "pdf_paths": lambda doi: [],  # IEEE uses stamp URL, needs page-level extraction
     },
     "Tandfonline": {
-        "sso_link_js": """
-            (() => {
-                const a = [...document.querySelectorAll('a')].find(a => {
-                    const href = (a.href || '').toLowerCase();
-                    const text = (a.innerText || '').toLowerCase();
-                    return href.includes('ssostart') || href.includes('shibboleth')
-                        || href.includes('institutional')
-                        || text.includes('access through your institution');
-                });
-                if (a) a.click();
-            })()
-        """,
+        "sso_link_js": _make_sso_click_js("ssostart", "shibboleth", "institutional",
+                                           text_patterns=("access through your institution",)),
         "search_selectors": [
             'input[placeholder*="institution"]',
             'input[placeholder*="Type the name"]',
@@ -916,106 +1064,42 @@ _PUBLISHER_SSO_CONFIG: dict[str, dict[str, Any]] = {
         "pdf_paths": lambda doi: [f"/doi/pdf/{doi}"],
     },
     "Oxford": {
-        "sso_link_js": """
-            (() => {
-                const a = [...document.querySelectorAll('a')].find(a => {
-                    const href = (a.href || '').toLowerCase();
-                    return href.includes('shibboleth') || href.includes('institutional');
-                });
-                if (a) a.click();
-            })()
-        """,
+        "sso_link_js": _make_sso_click_js("shibboleth", "institutional"),
         "search_selectors": ["#searchInstitution", "input[name='query']"],
         "pdf_paths": lambda doi: [f"/downloadpdf/{doi}"],
     },
     "RSC": {
-        "sso_link_js": """
-            (() => {
-                const a = [...document.querySelectorAll('a')].find(a => {
-                    const href = (a.href || '').toLowerCase();
-                    return href.includes('shibboleth') || href.includes('institutional');
-                });
-                if (a) a.click();
-            })()
-        """,
+        "sso_link_js": _make_sso_click_js("shibboleth", "institutional"),
         "search_selectors": ["input[name='search']", "#searchInstitution"],
         "pdf_paths": lambda doi: [f"/content/articlepdf/{doi}"],
     },
     "IOP": {
-        "sso_link_js": """
-            (() => {
-                const a = [...document.querySelectorAll('a')].find(a => {
-                    const href = (a.href || '').toLowerCase();
-                    return href.includes('shibboleth') || href.includes('institutional');
-                });
-                if (a) a.click();
-            })()
-        """,
+        "sso_link_js": _make_sso_click_js("shibboleth", "institutional"),
         "search_selectors": ["input[name='search']", "#searchInstitution"],
         "pdf_paths": lambda doi: [f"/article/{doi}/pdf"],
     },
     "APS": {
-        "sso_link_js": """
-            (() => {
-                const a = [...document.querySelectorAll('a')].find(a => {
-                    const href = (a.href || '').toLowerCase();
-                    return href.includes('shibboleth') || href.includes('institutional');
-                });
-                if (a) a.click();
-            })()
-        """,
+        "sso_link_js": _make_sso_click_js("shibboleth", "institutional"),
         "search_selectors": ["input[name='search']", "#searchInstitution"],
         "pdf_paths": lambda doi: [f"/pdf/{doi}"],
     },
     "AIP": {
-        "sso_link_js": """
-            (() => {
-                const a = [...document.querySelectorAll('a')].find(a => {
-                    const href = (a.href || '').toLowerCase();
-                    return href.includes('shibboleth') || href.includes('institutional');
-                });
-                if (a) a.click();
-            })()
-        """,
+        "sso_link_js": _make_sso_click_js("shibboleth", "institutional"),
         "search_selectors": ["input[name='search']", "#searchInstitution"],
         "pdf_paths": lambda doi: [],
     },
     "Nature": {
-        "sso_link_js": """
-            (() => {
-                const a = [...document.querySelectorAll('a')].find(a => {
-                    const href = (a.href || '').toLowerCase();
-                    return href.includes('shibboleth') || href.includes('institutional');
-                });
-                if (a) a.click();
-            })()
-        """,
+        "sso_link_js": _make_sso_click_js("shibboleth", "institutional"),
         "search_selectors": ["input[name='idpSearch']", "#searchInstitution"],
         "pdf_paths": lambda doi: [f"/articles/{doi}.pdf"],
     },
     "Science": {
-        "sso_link_js": """
-            (() => {
-                const a = [...document.querySelectorAll('a')].find(a => {
-                    const href = (a.href || '').toLowerCase();
-                    return href.includes('shibboleth') || href.includes('institutional');
-                });
-                if (a) a.click();
-            })()
-        """,
+        "sso_link_js": _make_sso_click_js("shibboleth", "institutional"),
         "search_selectors": ["input[name='search']", "#searchInstitution"],
         "pdf_paths": lambda doi: [f"/doi/pdf/{doi}"],
     },
     "ACM": {
-        "sso_link_js": """
-            (() => {
-                const a = [...document.querySelectorAll('a')].find(a => {
-                    const href = (a.href || '').toLowerCase();
-                    return href.includes('shibboleth') || href.includes('institutional');
-                });
-                if (a) a.click();
-            })()
-        """,
+        "sso_link_js": _make_sso_click_js("shibboleth", "institutional"),
         "search_selectors": ["input[name='search']", "#searchInstitution"],
         "pdf_paths": lambda doi: [f"/doi/pdf/{doi}"],
     },
@@ -1231,8 +1315,8 @@ def _browser_download(
                 return success(doi, output_path, f"{publisher}(HTTP)")
 
     if not is_available(config):
-        log.info(f"   [{publisher}] camofox not available, skipping browser strategy")
-        _set_error("camofox_unavailable", "start_camofox")
+        log.info(f"   [{publisher}] browser not available, skipping browser strategy")
+        _set_error("browser_unavailable", "start_browser")
         return False
 
     log.info(f"   [{publisher}] browser download: {article_url[:80]}")
@@ -1614,6 +1698,139 @@ def _browser_download_with_fallback(
 
 
 # ============================================================
+# Elsevier API (no browser needed)
+# ============================================================
+
+_CLOUDFLARE_COOKIE_NAMES = {"__cf_bm", "_cfuvid", "cf_clearance", "cf_chl_rc_ni"}
+
+
+def _persist_api_cookies(session: Any, config: dict[str, Any]) -> int:
+    """Extract cookies from a requests.Session and merge into publisher_cookies.json.
+
+    Skips cookies that are only Cloudflare bot-management cookies (__cf_bm, _cfuvid, etc.)
+    since those don't carry authentication and don't help the browser strategy.
+
+    Returns the number of cookies persisted.
+    """
+    from .browser_cookies import merge_cookies
+
+    raw = []
+    meaningful = 0
+    for c in session.cookies:
+        cookie = {
+            "name": c.name,
+            "value": c.value,
+            "domain": c.domain,
+            "path": c.path,
+            "secure": c.secure,
+            "expires": c.expires or 0,
+        }
+        raw.append(cookie)
+        if c.name not in _CLOUDFLARE_COOKIE_NAMES:
+            meaningful += 1
+
+    if not raw:
+        return 0
+
+    if meaningful == 0:
+        log.info(f"   [ElsevierAPI] {len(raw)} cookies are Cloudflare-only, skipping persist")
+        return 0
+
+    merged = merge_cookies(raw, config)
+    log.info(f"   [ElsevierAPI] persisted {meaningful} meaningful cookies "
+             f"({len(raw)} total, merged: {len(merged)})")
+    return meaningful
+
+
+def try_elsevier_api(
+    doi: str, output_path: Path, config: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Download Elsevier/ScienceDirect PDF via Article Retrieval API.
+
+    Uses the Elsevier Institutional API (api.elsevier.com) with an API key
+    and optional institutional token. This is far faster and more reliable
+    than browser-based login flows.
+
+    When the API does not return a PDF directly (no institutional access),
+    cookies from the redirect chain (api.elsevier.com → linkinghub.elsevier.com
+    → sciencedirect.com) are persisted for the browser strategy to reuse.
+
+    Config keys:
+        elsevier_api_key   — personal or institutional API key (required)
+        elsevier_insttoken — institutional token for campus-level access
+    """
+    api_key = config.get("elsevier_api_key", "")
+    if not api_key:
+        log.info(f"   [ElsevierAPI] no API key configured, skipping. "
+                 f"Run scansci_pdf_elsevier_setup to configure (free).")
+        return None
+
+    from .pdf_utils import is_pdf_file, success
+    from .network import USER_AGENT
+
+    url = f"https://api.elsevier.com/content/article/doi/{doi}"
+
+    headers: dict[str, str] = {
+        "Accept": "application/pdf",
+        "User-Agent": USER_AGENT,
+        "X-ELS-APIKey": api_key,
+    }
+    insttoken = config.get("elsevier_insttoken", "")
+    if insttoken:
+        headers["X-ELS-InstToken"] = insttoken
+
+    import requests
+    try:
+        session = requests.Session()
+        session.trust_env = False
+        resp = session.get(url, headers=headers, timeout=30, allow_redirects=True)
+    except Exception as e:
+        log.info(f"   [ElsevierAPI] request failed: {e}")
+        return None
+
+    if resp.status_code != 200:
+        if resp.status_code in (403, 429):
+            log.info(f"   [ElsevierAPI] HTTP {resp.status_code} — "
+                     f"API 配额可能已耗尽，自动切换浏览器策略。")
+        else:
+            log.info(f"   [ElsevierAPI] HTTP {resp.status_code} for {doi}")
+        return None
+
+    content_type = resp.headers.get("Content-Type", "")
+    is_pdf = "pdf" in content_type or resp.content[:5] == b"%PDF-"
+
+    if is_pdf:
+        # API returned PDF directly — save it
+        if len(resp.content) < config.get("min_pdf_size_bytes", 10000):
+            log.info(f"   [ElsevierAPI] response too small ({len(resp.content)} bytes)")
+            return None
+
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_bytes(resp.content)
+        if is_pdf_file(output_path):
+            log.info(f"   [ElsevierAPI] downloaded {len(resp.content)} bytes for {doi}")
+            # Still persist cookies for future use by other strategies
+            try:
+                _persist_api_cookies(session, config)
+            except Exception:
+                pass
+            return success(doi, output_path, "ElsevierAPI")
+
+        output_path.unlink(missing_ok=True)
+        return None
+
+    # Non-PDF response (XML/JSON metadata) — API key lacks direct PDF access.
+    # Persist cookies from the redirect chain so browser strategy can reuse them.
+    log.info(f"   [ElsevierAPI] non-PDF response ({content_type[:50]}), persisting cookies")
+    try:
+        _persist_api_cookies(session, config)
+    except Exception as e:
+        log.info(f"   [ElsevierAPI] cookie persist failed: {e}")
+
+    return None
+
+
+# ============================================================
 # Publisher entry points
 # ============================================================
 
@@ -1665,10 +1882,11 @@ def try_elsevier_browser(
             if is_pdf_file(output_path):
                 return success(doi, output_path, "CellPress(Browser)")
 
-    # Fallback to general browser download via DOI (for ScienceDirect articles)
+    # Fallback to general browser download for ScienceDirect articles
     # Only try if we haven't already detected a paywall
     if not _last_error_type:
-        article_url = f"https://doi.org/{doi}"
+        # Resolve DOI to direct sciencedirect.com URL (avoid linkinghub)
+        article_url = _resolve_elsevier_pii(doi, config) or f"https://doi.org/{doi}"
         if _browser_download_with_fallback(doi, article_url, output_path, config, "Elsevier"):
             if is_pdf_file(output_path):
                 return success(doi, output_path, "Elsevier(Browser)")
@@ -1689,6 +1907,7 @@ def _cell_press_showpdf_download(
         return None
 
     try:
+        _inject_cookies_to_tab(tab_id, config, "Elsevier")
         result = fetch_url(tab_id, show_pdf_url, config, timeout=30.0)
         if result and result.get("data"):
             pdf_bytes = result["data"]
