@@ -576,7 +576,7 @@ def papers(
     post_login_hold: int = typer.Option(0, "--post-login-hold", help="Seconds to keep the authorized article page open before PDF capture."),
     post_run_hold: int = typer.Option(0, "--post-run-hold", help="Seconds to keep the browser page open after capture or failure."),
     retry_failed: bool = typer.Option(True, "--retry/--no-retry", help="Retry transient failures in a fresh browser context."),
-    concurrency: int = typer.Option(1, "--concurrency", "-j", min=1, max=4, help="Parallel browser workers. Use 2 for ScienceDirect; higher values may trigger publisher checks."),
+    concurrency: int = typer.Option(0, "--concurrency", "-j", min=0, max=4, help="Parallel browser workers (0 = use config max_browser_workers, default 2)."),
     broker: bool = typer.Option(True, "--broker/--no-broker", help="Use the long-lived publisher session broker by default."),
     broker_ttl: int = typer.Option(86400, "--broker-ttl", help="Seconds to keep an auto-started broker alive."),
 ):
@@ -673,11 +673,12 @@ def papers(
         post_login_hold_sec=post_login_hold,
         post_run_hold_sec=post_run_hold,
     )
+    effective_concurrency = concurrency or cfg.get("max_browser_workers", 2)
     summary = downloader.run_records(
         records,
         run_dir,
         retry_failed=retry_failed,
-        concurrency=concurrency,
+        concurrency=effective_concurrency,
     )
     _print_batch_summary(summary)
     if summary["missing"] or summary.get("unverified", 0):
@@ -1114,6 +1115,9 @@ def config_cmd(
     set_elsevier_key: str = typer.Option("", "--elsevier-api-key", help="Set Elsevier API key."),
     set_elsevier_token: str = typer.Option("", "--elsevier-inst-token", help="Set Elsevier institutional token."),
     set_flaresolverr: str = typer.Option("", "--flaresolverr-url", help="Set FlareSolverr URL."),
+    set_static_proxy: str = typer.Option("", "--static-proxy", help="Set browser static proxy (e.g. socks5://1.2.3.4:1080)."),
+    set_remote_port: int = typer.Option(-1, "--remote-assist-port", help="Set remote assist HTTP port (0=disabled)."),
+    set_max_workers: int = typer.Option(-1, "--max-browser-workers", help="Set max parallel browser workers."),
     set_federated_enable: bool = typer.Option(False, "--federated-enable", help="Enable federated institutional auth."),
     set_federated_disable: bool = typer.Option(False, "--federated-disable", help="Disable federated institutional auth."),
     set_federated_school: str = typer.Option("", "--federated-school", help="Set school name for federated login."),
@@ -1195,6 +1199,22 @@ def config_cmd(
         changed = True
         console.print(f"[green]Federated login school set to: {federated_school}[/green]")
 
+    if set_static_proxy:
+        cfg["browser_static_proxy"] = set_static_proxy
+        changed = True
+        console.print(f"[green]Browser static proxy set to: {set_static_proxy}[/green]")
+
+    if set_remote_port >= 0:
+        cfg["remote_assist_port"] = set_remote_port
+        changed = True
+        status = f"port {set_remote_port}" if set_remote_port > 0 else "disabled"
+        console.print(f"[green]Remote assist: {status}[/green]")
+
+    if set_max_workers >= 1:
+        cfg["max_browser_workers"] = set_max_workers
+        changed = True
+        console.print(f"[green]Max browser workers set to: {set_max_workers}[/green]")
+
     if changed:
         save_config(cfg)
 
@@ -1202,7 +1222,8 @@ def config_cmd(
                       set_connector_url, set_proxy_url,
                        set_elsevier_key, set_elsevier_token, set_flaresolverr,
                        set_federated_enable, set_federated_disable, set_federated_school,
-                       set_carsi_enable, set_carsi_disable, set_carsi_school])
+                       set_carsi_enable, set_carsi_disable, set_carsi_school,
+                       set_static_proxy, set_remote_port >= 0, set_max_workers >= 1])
     if show and not has_setter:
         # Determine school type
         try:
@@ -1236,6 +1257,12 @@ def config_cmd(
         console.print(f"  Output dir:        {_od}")
         console.print(f"  Cache dir:         {_cd}")
         console.print(f"  Cookie path:       {_cp}")
+        _sp = cfg.get("browser_static_proxy", "")
+        _rp = cfg.get("remote_assist_port", 0)
+        _mw = cfg.get("max_browser_workers", 2)
+        console.print(f"  Static proxy:      {_sp or '(not set)'}")
+        console.print(f"  Remote assist:     {f'port {_rp}' if _rp else 'disabled'}")
+        console.print(f"  Browser workers:   {_mw}")
 
 
 def _run_federated_login(

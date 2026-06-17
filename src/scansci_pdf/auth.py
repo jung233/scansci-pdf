@@ -398,7 +398,7 @@ class EZProxyAuth:
         try:
             self._browser = launch(
                 headless=False, humanize=True,
-                args=["--disable-features=CrossOriginOpenerPolicy"],
+                args=self._browser_launch_args(),
             )
             self._context = self._browser.new_context()
             self._page = self._context.new_page()

@@ -232,6 +232,7 @@ def open_login_browser(
     max_wait: int = 300,
     auto_import: bool = True,
     keep_alive: bool = False,
+    publisher: str = "",
 ) -> bool | tuple[bool, Any, Any, Any]:
     """Open a visible stealth browser for interactive login.
 
@@ -243,6 +244,7 @@ def open_login_browser(
         max_wait: Max seconds to wait for login.
         auto_import: Whether to auto-import cookies into CloakBrowser.
         keep_alive: If True, return (True, context, page) without closing browser.
+        publisher: Publisher name for remote assist display.
 
     Returns:
         True if login succeeded, or (True, context, page) if keep_alive.
@@ -250,6 +252,14 @@ def open_login_browser(
     log.info(f"   [browser] Opening stealth browser: {url}")
     print(f"\n  请在浏览器中登录 ({url})")
     print("  程序会自动检测登录完成...\n")
+
+    # Start remote assist if port is configured
+    remote = None
+    if int(config.get("remote_assist_port", 0)) > 0:
+        from .remote_assist import RemoteAssist
+        remote = RemoteAssist(config, publisher=publisher)
+        remote.start()
+        remote.update_url(url)
 
     if not _HAS_CLOAKBROWSER:
         log.info("   [browser] cloakbrowser not installed")
@@ -274,8 +284,12 @@ def open_login_browser(
 
             try:
                 current_url = page.url
+                if remote:
+                    remote.update_url(current_url)
             except Exception:
                 log.info("   [browser] Browser closed by user.")
+                if remote:
+                    remote.stop()
                 if not keep_alive:
                     try:
                         browser.close()
@@ -292,6 +306,8 @@ def open_login_browser(
                 print(f"  登录成功！Cookie 已保存至 {cookie_file}")
                 if auto_import:
                     _import_to_browser(netscape_path, config)
+                if remote:
+                    remote.stop()
                 if keep_alive:
                     return True, context, page
                 browser.close()
@@ -308,12 +324,16 @@ def open_login_browser(
                     print(f"  登录成功！Cookie 已保存至 {cookie_file}")
                     if auto_import:
                         _import_to_browser(netscape_path, config)
+                    if remote:
+                        remote.stop()
                     if keep_alive:
                         return True, context, page
                     browser.close()
                     return True
 
         print("  登录超时。")
+        if remote:
+            remote.stop()
         if not keep_alive:
             try:
                 browser.close()

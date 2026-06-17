@@ -401,19 +401,11 @@ class PublisherBatchDownloader:
         return target
 
     def _launch_context(self, profile_dir: str | Path | None = None):
-        from .cloakbrowser_compat import prepare_cloakbrowser_runtime
-
-        prepare_cloakbrowser_runtime()
-        from cloakbrowser import launch_persistent_context
+        from .browser_engine import get_persistent_context
 
         profile_path = Path(profile_dir) if profile_dir else Path(self.config.get("chrome_profile_dir", ""))
         profile_path.mkdir(parents=True, exist_ok=True)
-        return launch_persistent_context(
-            user_data_dir=str(profile_path),
-            headless=False,
-            humanize=True,
-            args=["--disable-features=CrossOriginOpenerPolicy"],
-        )
+        return get_persistent_context(profile_path, self.config)
 
     def fetch_one(self, context: Any, record: PaperRecord, run_dir: Path) -> DownloadResult:
         page = context.new_page()

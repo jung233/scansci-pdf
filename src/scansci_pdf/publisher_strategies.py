@@ -77,22 +77,23 @@ def _visible_browser(config: dict[str, Any], publisher: str, *, viewport: dict |
     """Open visible CloakBrowser with persistent profile. Falls back to ephemeral."""
     if not _HAS_CLOAKBROWSER:
         raise RuntimeError("cloakbrowser not installed. Run: pip install cloakbrowser")
+    from .browser_engine import _build_browser_args
     profile_dir = _get_profile_dir(config, publisher)
     browser = None
+    args = _build_browser_args(config)
 
     try:
         ctx = launch_persistent_context(
             str(profile_dir),
             headless=False, humanize=True,
-            args=["--disable-features=CrossOriginOpenerPolicy"],
+            args=args,
         )
         page = ctx.new_page()
         log.info(f"   [{publisher}] persistent browser profile: {profile_dir}")
     except Exception as _e:
         log.info(f"   [{publisher}] persistent context unavailable ({_e}), using ephemeral")
         _vp = viewport or {"width": 1440, "height": 900}
-        browser = launch(headless=False, humanize=True,
-                         args=["--disable-features=CrossOriginOpenerPolicy"])
+        browser = launch(headless=False, humanize=True, args=args)
         ctx = browser.new_context(viewport=_vp)
         _restore_cookies_to_context(ctx, config)
         page = ctx.new_page()
