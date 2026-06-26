@@ -11,15 +11,14 @@ DATA_DIR = Path(os.environ.get("SCANSCI_PDF_DATA_DIR", str(Path.home() / ".scans
 CONFIG_FILE = DATA_DIR / "config.json"
 
 DEFAULT_SCIHUB_DOMAINS = [
-    # Working mirrors (verified 2026-05-31, PDF via sci.bban.top)
-    "https://sci-hub.mksa.top",
+    # Working mirrors (verified 2026-06-26)
+    "https://sci-hub.ru",
+    "https://sci-hub.ee",
     "https://sci-hub.al",
     "https://sci-hub.mk",
     "https://sci-hub.vg",
     # Cloudflare/CAPTCHA protected (may work via CloakBrowser)
     "https://sci-hub.st",
-    "https://sci-hub.ee",
-    "https://sci-hub.ru",
     # Legacy (currently down, kept for future recovery)
     "https://sci-hub.se",
     "https://sci-hub.is",
