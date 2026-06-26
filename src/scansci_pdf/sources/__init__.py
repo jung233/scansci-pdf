@@ -301,7 +301,7 @@ def _build_free_sources(doi: str, config: dict[str, Any]) -> list[tuple[Any, str
     if config.get("scihub_enabled", False):
         sources.append((try_scibban, "SciBban"))
     sources.append((try_libgen, "LibGen"))
-    if config.get("scihub_enabled", False) and not config.get("scihub_as_fallback", False):
+    if config.get("scihub_enabled", False):
         sources.append((try_scihub, "Sci-Hub"))
 
     return sort_sources(sources)
@@ -391,12 +391,6 @@ def _run_tiers_parallel(
         # Skip if another source already succeeded
         if cancel_event.is_set():
             return None
-        # Browser sources wait briefly to let fast API sources win first
-        is_browser = label in _BROWSER_SOURCE_LABELS
-        if is_browser:
-            cancel_event.wait(timeout=10)  # give API sources 10s head start
-            if cancel_event.is_set():
-                return None
         result = _try_source(fn, doi, src_output, config, label, use_tor=use_tor)
         if result and result.get("success"):
             with result_lock:
@@ -661,15 +655,6 @@ def download(
     if free_sources:
         result = _run_tiers_parallel(
             [(free_sources, "Free", 15)], doi, target_dir, output_path, config, use_tor, 15
-        )
-        if result:
-            return _finalize_result(result, identifier, doi, target_dir, config, rename=rename, bibtex=bibtex)
-
-    # Phase 1.5: Sci-Hub fallback — only when scihub_as_fallback is enabled
-    if config.get("scihub_enabled", False) and config.get("scihub_as_fallback", False):
-        log.info("   Paid sources failed, trying Sci-Hub as fallback...")
-        result = _run_tiers_parallel(
-            [([(try_scihub, "Sci-Hub")], "SciHub", 30)], doi, target_dir, output_path, config, use_tor, 30
         )
         if result:
             return _finalize_result(result, identifier, doi, target_dir, config, rename=rename, bibtex=bibtex)
