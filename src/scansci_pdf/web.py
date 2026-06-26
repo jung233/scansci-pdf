@@ -21,6 +21,7 @@ log = get_logger()
 
 _TEMPLATE_DIR = Path(__file__).parent / "templates"
 templates = Jinja2Templates(directory=str(_TEMPLATE_DIR))
+templates.env.cache_size = 0
 
 app = FastAPI(title="ScanSci PDF", description="Academic paper downloader web UI")
 
