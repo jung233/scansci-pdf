@@ -45,8 +45,10 @@ def run_server(
         log.info(f"Starting web UI on http://{host}:{port}")
         uvicorn.run(web_app, host=host, port=port)
     else:
+        import uvicorn
         log.info(f"Starting HTTP server on {host}:{port}")
-        mcp_app.run(transport="streamable-http", host=host, port=port)
+        asgi_app = mcp_app.streamable_http_app()
+        uvicorn.run(asgi_app, host=host, port=port)
 
 
 @app.command("check")
