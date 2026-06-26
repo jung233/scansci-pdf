@@ -5,7 +5,7 @@ WORKDIR /app
 COPY pyproject.toml .
 COPY src ./src
 
-RUN pip install --no-cache-dir ".[tor,instsci]"
+RUN pip install --no-cache-dir ".[web,instsci]"
 
 FROM python:3.12-slim
 
