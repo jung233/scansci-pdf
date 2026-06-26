@@ -366,6 +366,7 @@ def _search_pubmed(
             "is_oa": False,
             "oa_url": "",
             "pmid": pmid,
+            "source": "pubmed",
         })
 
     return results
