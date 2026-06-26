@@ -121,8 +121,7 @@ async def api_download(req: DownloadRequest):
             )
 
     # Run download in thread pool to avoid blocking the event loop
-    loop = asyncio.get_event_loop()
-    result = await loop.run_in_executor(None, lambda: download(identifier))
+    result = await asyncio.to_thread(download, identifier)
 
     if result.get("success"):
         file_path = result.get("file", "")

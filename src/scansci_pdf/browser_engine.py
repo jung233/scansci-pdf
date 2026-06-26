@@ -70,6 +70,20 @@ def _get_shared_browser(config: dict[str, Any] | None = None):
     if browser is not None:
         return browser, context
 
+    # Playwright Sync API cannot run inside an asyncio event loop
+    try:
+        import asyncio
+        asyncio.get_running_loop()
+        raise RuntimeError(
+            "CloakBrowser (Playwright Sync API) cannot run inside an asyncio event loop. "
+            "Use the HTTP download sources instead, or run outside of async context."
+        )
+    except RuntimeError as e:
+        if "cannot run inside" in str(e):
+            raise
+        # No running loop — OK to proceed
+        pass
+
     if not _check_cloakbrowser():
         raise RuntimeError("cloakbrowser not installed. Run: pip install cloakbrowser")
 
