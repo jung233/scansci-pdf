@@ -114,7 +114,7 @@ PREPRINT_PREFIXES: dict[str, str] = {
 # Browser strategies (ElsevierBrowser, etc.) use browser for anti-bot bypass
 PUBLISHER_TOOL_MAP: dict[str, list[str]] = {
     "Nature": ["NatureDirect", "PublisherDirect", "NatureBrowser", "Crossref", "Unpaywall"],
-    "MDPI": ["MDPIDirect", "GenericBrowser", "Crossref", "Unpaywall"],
+    "MDPI": ["MDPIDirect", "Crossref", "Unpaywall"],
     "arXiv": ["arXiv"],
     "bioRxiv": ["arXiv", "Unpaywall"],
     "Elsevier": ["Crossref", "Unpaywall", "ElsevierAPI", "ElsevierBrowser"],
@@ -489,6 +489,28 @@ def try_mdpi_direct(
                 session.close()
             except Exception:
                 pass
+
+    if config.get("browser_enabled", True) and not _cancelled(cancel_event):
+        try:
+            from ..browser_engine import download_pdf_via_browser, is_available
+
+            if is_available(config):
+                for pdf_url in urls:
+                    if _cancelled(cancel_event):
+                        return None
+                    log.info(f"   [MDPI] browser download: {pdf_url}")
+                    if download_pdf_via_browser(
+                        pdf_url,
+                        output_path,
+                        config,
+                        timeout=90.0,
+                        cancel_event=cancel_event,
+                    ):
+                        if not _cancelled(cancel_event) and is_pdf_file(output_path):
+                            return success(doi, output_path, "MDPI(Browser)")
+        except Exception as exc:
+            if not _cancelled(cancel_event):
+                log.info(f"   [MDPI] browser fallback failed: {exc}")
     return None
 
 
