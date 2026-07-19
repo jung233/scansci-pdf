@@ -15,12 +15,12 @@ from typing import Any
 from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.templating import Jinja2Templates
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
+from .advanced_search import search_papers_detailed
 from .config import load_config
 from .identifiers import is_arxiv_identifier, normalize_doi
 from .log import get_logger
-from .search import search_papers
 from .sources import download
 
 log = get_logger()
@@ -78,8 +78,30 @@ class DownloadRequest(BaseModel):
 
 
 class SearchRequest(BaseModel):
-    query: str
-    limit: int = 50
+    query: str = ""
+    limit: int = Field(default=50, ge=1, le=100)
+    detailed: bool = False
+    sources: list[str] | None = None
+    query_mode: str = "auto"
+    exact: bool = False
+    offset: int = Field(default=0, ge=0)
+    year_from: int | None = None
+    year_to: int | None = None
+    date_from: str | None = None
+    date_to: str | None = None
+    sort: str = "relevance"
+    author: str | None = None
+    author_id: str | None = None
+    publication_types: list[str] | None = None
+    fields_of_study: list[str] | None = None
+    venue: str | None = None
+    category: str | None = None
+    open_access_only: bool = False
+    has_abstract: bool | None = None
+    min_citations: int | None = Field(default=None, ge=0)
+    language: str | None = None
+    recent_days: int | None = Field(default=None, ge=1, le=365)
+    enrich_open_access: bool = False
 
 
 # --- Helper ---
@@ -401,21 +423,41 @@ async def api_download_stream(req: DownloadRequest, request: Request):
 
 @app.post("/api/search")
 async def api_search(req: SearchRequest):
-    """Search papers by keyword. Returns list of results."""
+    """Search papers; detailed mode adds retrieval provenance."""
     query = req.query.strip()
-    if not query:
+    if not query and not (
+        req.author or req.author_id or req.date_from or req.date_to or req.recent_days
+    ):
         return JSONResponse([], status_code=400)
 
     # Normalize DOI URL
     if _DOI_URL_PATTERN.match(query):
         query = _DOI_URL_PATTERN.sub("", query)
 
-    # If input is a DOI/arXiv, skip search and return a single-item result
-    if _is_doi_or_arxiv(query):
+    # Preserve the legacy direct-identifier response unless detailed mode is requested.
+    if not req.detailed and _is_doi_or_arxiv(query):
         return JSONResponse([{"doi": normalize_doi(query) if not is_arxiv_identifier(query) else query, "title": "", "is_direct": True}])
 
-    results = await asyncio.to_thread(search_papers, query, limit=req.limit)
-    return JSONResponse(results)
+    try:
+        result = await asyncio.to_thread(
+            search_papers_detailed,
+            query=query, limit=req.limit, sources=req.sources,
+            query_mode=req.query_mode, exact=req.exact, offset=req.offset,
+            year_from=req.year_from, year_to=req.year_to,
+            date_from=req.date_from, date_to=req.date_to, sort=req.sort,
+            author=req.author, author_id=req.author_id,
+            publication_types=req.publication_types,
+            fields_of_study=req.fields_of_study, venue=req.venue,
+            category=req.category, open_access_only=req.open_access_only,
+            has_abstract=req.has_abstract, min_citations=req.min_citations,
+            language=req.language, recent_days=req.recent_days,
+            enrich_open_access=req.enrich_open_access,
+        )
+    except ValueError as exc:
+        if req.detailed:
+            return JSONResponse({"results": [], "error": str(exc)}, status_code=400)
+        return JSONResponse([], status_code=400)
+    return JSONResponse(result if req.detailed else result["results"])
 
 
 @app.get("/api/status")
